@@ -225,6 +225,8 @@ If a local board server is running, compare `state.yaml` with `http://127.0.0.1:
 
 Board-health work should verify these truths: `active_task` matches live task status, done and blocked tasks have receipts, human-blocked work is in the blocked column, future work stays queued, and the live board/API reflects `state.yaml`.
 
+The checker and the task-prompt renderer also emit advisory process-heavy warnings. They never fail an otherwise valid board, and they never ask to rewrite completed history or receipts; only future work should be consolidated into roughly 3-7 outcome-sized phases. The thresholds live in `PROCESS_HEAVY_THRESHOLDS` in `scripts/check-goal-state.mjs` (mirrored in `scripts/render-task-prompt.mjs`) and warn when: unfinished cards reach 12 or more, including on blocked boards with no active task; PM/Judge/Scout cards exceed twice the Worker cards once the board has 12 or more cards; or 4 or more consecutive dispatched process-only cards follow the last Worker card without a new verifiable capability.
+
 ## Operator Escalation
 
 When Scout, Judge, Worker, or PM discovers a problem, improvement opportunity, product suggestion, follow-up repair, or tool limitation that should not be fixed inside the current active task, do not let it disappear in chat.

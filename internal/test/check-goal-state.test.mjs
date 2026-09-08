@@ -5,6 +5,8 @@ import { spawnSync } from "node:child_process";
 import test from "node:test";
 import assert from "node:assert/strict";
 
+import { renderTaskPrompt, formatPrompt } from "../../goalbuddy/scripts/render-task-prompt.mjs";
+
 const checker = resolve("goalbuddy/scripts/check-goal-state.mjs");
 
 function makeRoot() {
@@ -329,6 +331,120 @@ checks:
     assert.equal(result.stdout.ok, true);
     assert.match(result.stdout.warnings.join("\n"), /Board may be micro-slicing\. Prefer the largest safe useful slice/i);
     assert.match(result.stdout.warnings.join("\n"), /Micro Worker\/Judge loop detected/i);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+function processHeavyBoard() {
+  const pad = (value) => `T${String(value).padStart(3, "0")}`;
+  const cards = [];
+  let id = 0;
+  cards.push(`  - id: ${pad(++id)}
+    type: worker
+    assignee: Worker
+    status: done
+    objective: "Ship the first outcome slice."
+    allowed_files:
+      - package.json
+    verify:
+      - npm test
+    stop_if:
+      - "Verification fails twice."
+    receipt:
+      result: done
+      changed_files:
+        - package.json
+      commands:
+        - cmd: npm test
+          status: pass
+      summary: "Slice shipped."`);
+  for (let index = 0; index < 8; index += 1) {
+    cards.push(`  - id: ${pad(++id)}
+    type: judge
+    assignee: Judge
+    status: done
+    objective: "Audit micro-step ${id}."
+    receipt:
+      result: done
+      decision: approved`);
+    cards.push(`  - id: ${pad(++id)}
+    type: pm
+    assignee: PM
+    status: done
+    objective: "Plan micro-step ${id}."
+    receipt:
+      result: done
+      summary: "Planned."`);
+  }
+  for (let index = 0; index < 13; index += 1) {
+    cards.push(`  - id: ${pad(++id)}
+    type: pm
+    assignee: PM
+    status: blocked
+    objective: "Process follow-up ${id}."
+    receipt:
+      result: blocked
+      summary: "Waiting on process."`);
+  }
+  return `
+version: 2
+goal:
+  title: "Process heavy"
+  slug: "process-heavy"
+  kind: open_ended
+  tranche: "consolidation"
+  status: blocked
+agents:
+  scout: installed
+  worker: installed
+  judge: installed
+active_task: null
+tasks:
+${cards.join("\n")}
+`;
+}
+
+test("warns on process-heavy boards and blocked backlogs without failing them", () => {
+  const root = makeRoot();
+  try {
+    writeState(root, processHeavyBoard());
+    const result = runChecker(root);
+    assert.equal(result.status, 0, result.stderr || JSON.stringify(result.stdout));
+    assert.equal(result.stdout.ok, true);
+    const joined = result.stdout.warnings.join("\n");
+    assert.match(joined, /13 unfinished tasks on a blocked board with no active task/i);
+    assert.match(joined, /29 PM\/Judge\/Scout tasks vs 1 Worker tasks/i);
+    assert.match(joined, /consecutive planning, audit, or process-only tasks/i);
+    assert.match(joined, /consolidate only future work into roughly 3-7 outcome-sized phases/i);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("prompt renderer surfaces process-heavy warnings without failing the board", () => {
+  const root = makeRoot();
+  try {
+    writeState(root, processHeavyBoard());
+    const result = renderTaskPrompt({ goalRoot: root, taskId: "T030", json: true });
+    const joined = result.payload.metadata.warnings.join("\n");
+    assert.match(joined, /Board is process-heavy/i);
+    assert.match(joined, /PM\/Judge\/Scout tasks vs 1 Worker tasks/i);
+    assert.match(formatPrompt(result.payload), /Board is process-heavy/i);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("keeps normal small boards free of process-heavy warnings", () => {
+  const root = makeRoot();
+  try {
+    writeState(root, validScoutBoard);
+    const result = runChecker(root);
+    assert.equal(result.stdout.ok, true);
+    assert.doesNotMatch(result.stdout.warnings.join("\n"), /process-heavy/i);
+    const rendered = renderTaskPrompt({ goalRoot: root, taskId: "T001", json: true });
+    assert.doesNotMatch(rendered.payload.metadata.warnings.join("\n"), /process-heavy/i);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

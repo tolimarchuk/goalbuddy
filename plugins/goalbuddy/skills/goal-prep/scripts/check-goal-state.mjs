@@ -452,6 +452,7 @@ for (const task of tasks) {
 }
 
 warnings.push(...microSliceWarnings(tasks, activeTask, goalStatus));
+warnings.push(...processHeavyWarnings(tasks, activeTask, goalStatus));
 
 function isTerminalApprovalWait(tasks, activeTasks, activeTask) {
   if (goalStatus !== "blocked") return false;
@@ -588,6 +589,45 @@ function isTinyTask(task) {
   const text = [task.objective, task.raw, task.receipt?.raw].join(" ").toLowerCase();
   if (/collapsed|batch|package|tranche|vertical slice|milestone/.test(text)) return false;
   return /\b(tiny|narrow|single helper|one helper|projection helper|projection function|contract file|read-only proof|doc note|validator|validation wrapper|pure helper|caller-input)\b/.test(text);
+}
+
+// Advisory process-heavy heuristics: they never fail a board and never rewrite completed
+// history; only future work should be consolidated. Tune via PROCESS_HEAVY_THRESHOLDS:
+// largeUnfinished (unfinished cards, including blocked boards with no active task),
+// ratioMinTasks + processToWorkerRatio (PM/Judge/Scout cards vs Worker cards), and processRun
+// (consecutive dispatched process-only cards since the last Worker card). Keep this function
+// byte-identical to processHeavyWarnings in scripts/render-task-prompt.mjs.
+function processHeavyWarnings(tasks, activeTaskId, goalStatus) {
+  const PROCESS_HEAVY_THRESHOLDS = {
+    largeUnfinished: 12,
+    ratioMinTasks: 12,
+    processToWorkerRatio: 2,
+    processRun: 4,
+  };
+  const { largeUnfinished, ratioMinTasks, processToWorkerRatio, processRun } = PROCESS_HEAVY_THRESHOLDS;
+  const found = [];
+  const consolidate = "Preserve completed history and consolidate only future work into roughly 3-7 outcome-sized phases. Duration alone is not a reason to use GoalBuddy; native Goal may fit a long single-owner sequential run better.";
+  const isWorker = (task) => task.type?.toLowerCase() === "worker";
+  const unfinished = tasks.filter((task) => task.status !== "done");
+  if (unfinished.length >= largeUnfinished) {
+    const stalled = goalStatus !== "active" && !activeTaskId ? " on a blocked board with no active task" : "";
+    found.push(`Board is process-heavy: ${unfinished.length} unfinished tasks${stalled}. ${consolidate}`);
+  }
+  const workerCount = tasks.filter(isWorker).length;
+  const processCount = tasks.length - workerCount;
+  if (tasks.length >= ratioMinTasks && processCount > processToWorkerRatio * Math.max(workerCount, 1)) {
+    found.push(`Board is process-heavy: ${processCount} PM/Judge/Scout tasks vs ${workerCount} Worker tasks. One task should normally include implementation, targeted tests, CI/readback, and proof when authority and risk stay the same. Reserve Scout for material uncertainty and Judge for phase, risk, rejected-verification, or final boundaries.`);
+  }
+  const dispatched = tasks.filter((task) => task.status !== "queued");
+  let run = 0;
+  for (let index = dispatched.length - 1; index >= 0; index -= 1) {
+    if (isWorker(dispatched[index])) break;
+    run += 1;
+  }
+  if (run >= processRun) {
+    found.push(`Board is process-heavy: ${run} consecutive planning, audit, or process-only tasks since the last Worker task added no new verifiable capability. ${consolidate}`);
+  }
+  return found;
 }
 
 function matchesAllowedFile(file, allowedFiles) {

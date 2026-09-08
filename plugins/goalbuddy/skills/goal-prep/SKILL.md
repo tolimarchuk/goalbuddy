@@ -206,6 +206,8 @@ After two tiny tasks in a row, PM or Judge should reorient the board. If a demo 
 
 Tiny tasks are allowed when the failure is isolated, the risk is high, the scope is unknown, or the tiny task unlocks a larger slice. Tiny tasks are bad when they keep happening, do not change behavior, only add wrappers/contracts/proof files, or avoid the real milestone.
 
+One task normally carries its slice end to end: implementation, targeted tests, CI or readback, and proof, whenever authority and risk stay the same. Do not split planning, individual checks, CI, readback, or receipt handling into separate cards; that duplicates native Goal and PR/CI evidence instead of reducing risk. Reserve Scout for material uncertainty and Judge for phase, risk, rejected-verification, or final-completion boundaries.
+
 ## When To Use
 
 Use this skill for goals that are broad, multi-hour, ambiguous, high-risk, already planned, already stale, already red, or likely to need Scout/Judge/Worker delegation.
@@ -300,6 +302,8 @@ The PM owns the board. Scout, Judge, and Worker return receipts; they do not sel
 ## Seed Boards
 
 If the goal is vague, the first active task is Scout, but the seeded board should still lead toward execution. Queue Judge selection, a bounded Worker slot, and a final audit.
+
+Seed roughly 3-7 outcome-sized phases, not a long chain of micro-steps. Duration alone is not a reason to use GoalBuddy; a long single-owner sequential run may fit native Goal better. When an existing board has grown process-heavy, preserve completed history and receipts unchanged and consolidate only the future work into outcome-sized phases.
 
 If the user provides an existing plan, do not ignore it and do not execute it blindly. Preserve the plan in `goal.intake.existing_plan_facts`, make the first active task PM or Judge validation, and queue Worker slices only after the plan is checked for evidence, risk, allowed files, verification, and stop conditions.
 
