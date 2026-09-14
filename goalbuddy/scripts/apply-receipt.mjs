@@ -6,6 +6,9 @@ import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { parseBoard, parseJson } from "./strict-data.mjs";
+import { validateDispatchReport, validateIdentity } from "./receipt-contract.mjs";
+
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 
 if (isDirectRun()) {
@@ -63,11 +66,15 @@ export function applyReceipt(options) {
   const goalRoot = resolve(options.goalRoot);
   const statePath = basename(goalRoot) === "state.yaml" ? goalRoot : join(goalRoot, "state.yaml");
   if (!existsSync(statePath)) throw new Error(`state file not found: ${statePath}`);
-  const receipt = loadReceipt(options.receiptPath);
+  const original = readFileSync(statePath, "utf8");
+  const board = parseBoard(original);
+  const task = board.tasks.find(task => task.id === options.taskId);
+  if (!task) throw new Error(`Task ${options.taskId} not found in state.yaml`);
+  const { receipt, provenance } = loadReceipt(options.receiptPath, { taskId: options.taskId, boardPath: statePath, board, task, harness: task.harness });
   const status = options.status || (receipt.result === "done" ? "done" : "blocked");
+  if (status !== receipt.result) throw new Error("Requested status contradicts the receipt result.");
   if (!["done", "blocked"].includes(status)) throw new Error(`Unsupported --status: ${status}`);
 
-  const original = readFileSync(statePath, "utf8");
   let lines = original.replace(/\r\n/g, "\n").split("\n");
 
   lines = setTaskField(lines, options.taskId, "status", status);
@@ -78,7 +85,9 @@ export function applyReceipt(options) {
   const nextActive = options.activate === "none" || !options.activate ? "null" : options.activate;
   lines = setTopLevel(lines, "active_task", nextActive);
 
-  writeAtomic(statePath, lines.join("\n"));
+  if (readFileSync(statePath, "utf8") !== original) throw new Error("Board changed during receipt validation; import was not applied.");
+  const proposed = lines.join("\n");
+  writeAtomic(statePath, proposed);
 
   const check = spawnSync(process.execPath, [join(scriptDir, "check-goal-state.mjs"), statePath], { encoding: "utf8" });
   let checkerReport = null;
@@ -88,7 +97,8 @@ export function applyReceipt(options) {
     checkerReport = { ok: false, errors: [`checker produced unreadable output: ${(check.stderr || check.stdout || "").slice(0, 300)}`] };
   }
 
-  if (!checkerReport.ok) {
+  if (!checkerReport.ok || check.status !== 0) {
+    if (readFileSync(statePath, "utf8") !== (proposed.endsWith("\n") ? proposed : `${proposed}\n`)) throw new Error("Concurrent board update preserved; failed transition requires PM recovery.");
     writeAtomic(statePath, original);
     return { ok: false, task_id: options.taskId, status, active_task: nextActive, reverted: true, checker_errors: checkerReport.errors || [] };
   }
@@ -106,6 +116,7 @@ export function applyReceipt(options) {
     active_task: nextActive,
     reverted: false,
     checker_warnings: checkerReport.warnings || [],
+    receipt_provenance: provenance,
     stop_allowed: stopReport.can_stop === true,
     continuation_required: stopReport.can_stop !== true,
     stop_reason: stopReport.reason || "unknown",
@@ -115,16 +126,18 @@ export function applyReceipt(options) {
   };
 }
 
-function loadReceipt(receiptPath) {
-  const parsed = JSON.parse(readFileSync(resolve(receiptPath), "utf8"));
-  const candidate = parsed.receipt && parsed.scope_check ? parsed.receipt : parsed.goalbuddy_receipt_v1 ?? parsed;
-  if (!candidate || typeof candidate !== "object" || typeof candidate.result !== "string") {
-    throw new Error(`${receiptPath} does not contain a receipt (need a JSON object with a "result" field, a goalbuddy_receipt_v1 envelope, or a dispatch report).`);
-  }
+function loadReceipt(receiptPath, context) {
+  const parsed = parseJson(readFileSync(resolve(receiptPath), "utf8"));
+  const report = parsed && ("scope_check" in parsed || "dispatch_version" in parsed || "receipt" in parsed);
+  if (report) validateDispatchReport(parsed, context);
+  const candidate = report ? parsed.receipt : parsed.goalbuddy_receipt_v1 ?? parsed;
+  // Bare/enveloped v1 receipts remain a deliberate PM import path. Absence is
+  // compatible; contradictory supplied identity is never stripped into validity.
+  validateIdentity(candidate, context);
   const receipt = { ...candidate };
   delete receipt.board_path;
   delete receipt.task_id;
-  return receipt;
+  return { receipt, provenance: report ? "verified_dispatch" : "pm_import_without_dispatch_observation" };
 }
 
 function taskBlockRange(lines, taskId) {

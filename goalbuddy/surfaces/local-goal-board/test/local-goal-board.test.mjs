@@ -5,7 +5,8 @@ import { request as httpRequest } from "node:http";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { buildColumns, createBoardPayload, writeBoardApp } from "../scripts/lib/goal-board.mjs";
+import { buildColumns, createBoardPayload, parseGoalStateText, writeBoardApp } from "../scripts/lib/goal-board.mjs";
+import { toYamlLines } from "../../../scripts/apply-receipt.mjs";
 import { parseArgs, startBoardServer } from "../scripts/local-goal-board.mjs";
 
 test("normalizes a dense goal into local board columns", () => {
@@ -1028,3 +1029,40 @@ tasks:
       note: notes/T001-note.md
 `;
 }
+
+
+for (const value of [
+  String.raw`C:\hostedtoolcache\windows\node\18.20.8\x64\node.exe`,
+  String.raw`C:\Users\RUNNER~1\AppData\Local\Temp\node checks\run.mjs`,
+  String.raw`\\server\share\node`, "ends with a slash\\", '\\n literal versus \n newline',
+  'quoted "value" and \\"slash"', "\b\f\n\r\t\u0000\u001f", "\ud800", "Unicode \u00a0\u2028\ufeff",
+]) {
+  test(`scalar decoder preserves JSON.stringify and serializer round trips: ${JSON.stringify(value)}`, () => {
+    for (const strict of [false, true]) {
+      assert.equal(parseGoalStateText(`value: ${JSON.stringify(value)}\n`, { strict }).value, value);
+      assert.equal(parseGoalStateText(`value: ${JSON.stringify(value)} # outside comment\n`, { strict }).value, value);
+      const text = 'tasks:\n  - id: T999\n' + toYamlLines({ acceptance: { command: [value, "acceptance.mjs"] } }, 4).join("\n");
+      assert.deepEqual(parseGoalStateText(text, { strict }).tasks[0].acceptance.command, [value, "acceptance.mjs"]);
+      assert.deepEqual(parseGoalStateText(`values: [${JSON.stringify(value)}, "next"] # outside comment`, { strict }).values, [value, "next"]);
+    }
+  });
+}
+
+test("scalar decoder preserves supported legacy single quotes and literal unknown escapes", () => {
+  assert.equal(parseGoalStateText("value: 'it''s C:\\node'", { strict: true }).value, "it's C:\\node");
+  assert.equal(parseGoalStateText(String.raw`value: "legacy \q and \U unchanged"`, { strict: true }).value, String.raw`legacy \q and \U unchanged`);
+});
+
+for (const scalar of ['"unterminated', "'unterminated", String.raw`"trailing\"`, '"inner"quote"', "'inner'quote'", String.raw`"bad\u12XZ"`]) {
+  test(`scalar decoder rejects malformed quoted scalar: ${scalar}`, () => {
+    assert.throws(() => parseGoalStateText(`value: ${scalar}`, { strict: true }), /quoted|escape/i);
+  });
+}
+
+test("scalar decoder retains strict mapping duplicate rejection and display recovery", () => {
+  for (const continuation of ["    status: pass", "      status: pass", "    status : pass"]) {
+    const text = `tasks:\n  - status: fail\n${continuation}\n`;
+    assert.throws(() => parseGoalStateText(text, { strict: true }), /Duplicate YAML key: status/);
+    assert.equal(parseGoalStateText(text).tasks[0].status, "pass");
+  }
+});

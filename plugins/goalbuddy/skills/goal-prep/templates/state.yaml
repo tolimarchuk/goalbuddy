@@ -1,5 +1,5 @@
 # GoalBuddy v2 state.yaml
-# Board truth lives here. goal.md is the editable charter; notes/ holds long receipts only.
+# Board truth lives here. goal.md is the editable charter; notes/ holds evidence and acceptance attempts.
 
 version: 2
 
@@ -12,7 +12,7 @@ goal:
   oracle:
     signal: "<live check, walkthrough, artifact, metric, source-backed answer, or decision that proves the owner outcome>"
     cadence: "after each Worker package and at final audit"
-    final_proof: "<receipt-backed evidence required before full_outcome_complete: true>"
+    final_proof: "<current acceptance check and artifact evidence; see references/goal-execution.md>"
   intake:
     original_request: "<shortest faithful user request>"
     interpreted_outcome: "<one sentence>"
@@ -131,6 +131,15 @@ tasks:
     status: queued
     reasoning_hint: default
     objective: "Audit whether the implemented slice satisfies the original user outcome for this tranche."
+    # Before final audit: adapt this ONE authorized verification to the goal oracle.
+    # The PM records it while this task is active; the final receipt consumes its evidence.
+    acceptance:
+      command: ["node", "test/acceptance.mjs"]
+      artifacts: ["src"]
+      inputs: [] # additional concrete files/directories the check depends on
+      timeout_seconds: 1200
+      # max_age_seconds: 3600 # optional, for time-sensitive evidence
+      # workspace: ../../.. # relative to goal directory; required for non-Git goals
     inputs:
       - "All done task receipts"
       - "Last verification"

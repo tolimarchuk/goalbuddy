@@ -353,17 +353,17 @@ function normalizeTaskStatus(value) {
   return status;
 }
 
-export function parseGoalStateText(text) {
+export function parseGoalStateText(text, { strict = false } = {}) {
   try {
     const lines = tokenizeYaml(text);
     if (!lines.length) throw new GoalBoardError("Goal state is empty.");
-    const [value, nextIndex] = parseBlock(lines, 0, lines[0].indent);
+    const [value, nextIndex] = parseBlock(lines, 0, lines[0].indent, strict);
     if (nextIndex < lines.length) {
       throw new GoalBoardError(`Could not parse line ${lines[nextIndex].number}.`);
     }
     return value;
   } catch (error) {
-    if (error instanceof GoalBoardError && canRecoverBoardSubset(error)) {
+    if (!strict && error instanceof GoalBoardError && canRecoverBoardSubset(error)) {
       const document = parseGoalBoardSubset(text);
       document.__parseWarning = `Strict parse failed (${error.message}) Showing a best-effort fallback view; fields the fallback parser cannot read are omitted. Fix state.yaml formatting to see the full board.`;
       return document;
@@ -608,7 +608,9 @@ function stripComment(line) {
   for (let index = 0; index < line.length; index += 1) {
     const char = line[index];
     const previous = line[index - 1];
-    if ((char === "\"" || char === "'") && previous !== "\\") {
+    if (quote === '"' && char === "\\") { index++; continue; }
+    if (quote === "'" && char === "'" && line[index + 1] === "'") { index++; continue; }
+    if (char === "\"" || char === "'") {
       quote = quote === char ? null : quote || char;
       continue;
     }
@@ -619,14 +621,23 @@ function stripComment(line) {
   return line;
 }
 
-function parseBlock(lines, index, indent) {
+function parseBlock(lines, index, indent, strict) {
   if (index >= lines.length) return [{}, index];
   if (lines[index].indent < indent) return [{}, index];
-  if (lines[index].text.startsWith("- ")) return parseArray(lines, index, indent);
-  return parseObject(lines, index, indent);
+  if (lines[index].text.startsWith("- ")) return parseArray(lines, index, indent, strict);
+  return parseObject(lines, index, indent, strict);
 }
 
-function parseObject(lines, index, indent) {
+function assignMapping(object, key, value, strict) {
+  if (strict) {
+    if (Object.hasOwn(object, key)) throw new GoalBoardError(`Duplicate YAML key: ${key}.`);
+    Object.defineProperty(object, key, { value, enumerable: true, writable: true, configurable: true });
+  } else {
+    object[key] = value;
+  }
+}
+
+function parseObject(lines, index, indent, strict) {
   const object = {};
   while (index < lines.length) {
     const line = lines[index];
@@ -638,20 +649,20 @@ function parseObject(lines, index, indent) {
 
     if (valueText === "") {
       if (index < lines.length && lines[index].indent > indent) {
-        const [child, nextIndex] = parseBlock(lines, index, lines[index].indent);
-        object[key] = child;
+        const [child, nextIndex] = parseBlock(lines, index, lines[index].indent, strict);
+        assignMapping(object, key, child, strict);
         index = nextIndex;
       } else {
-        object[key] = {};
+        assignMapping(object, key, {}, strict);
       }
     } else {
-      object[key] = parseScalar(valueText);
+      assignMapping(object, key, parseScalar(valueText), strict);
     }
   }
   return [object, index];
 }
 
-function parseArray(lines, index, indent) {
+function parseArray(lines, index, indent, strict) {
   const array = [];
   while (index < lines.length) {
     const line = lines[index];
@@ -662,7 +673,7 @@ function parseArray(lines, index, indent) {
 
     if (content === "") {
       if (index < lines.length && lines[index].indent > indent) {
-        const [child, nextIndex] = parseBlock(lines, index, lines[index].indent);
+        const [child, nextIndex] = parseBlock(lines, index, lines[index].indent, strict);
         array.push(child);
         index = nextIndex;
       } else {
@@ -674,11 +685,11 @@ function parseArray(lines, index, indent) {
     if (isInlineMapping(content)) {
       const object = {};
       const { key, valueText } = splitKeyValue({ text: content, number: line.number });
-      object[key] = valueText === "" ? {} : parseScalar(valueText);
+      assignMapping(object, key, valueText === "" ? {} : parseScalar(valueText), strict);
       if (index < lines.length && lines[index].indent > indent) {
-        const [child, nextIndex] = parseBlock(lines, index, lines[index].indent);
+        const [child, nextIndex] = parseBlock(lines, index, lines[index].indent, strict);
         if (child && typeof child === "object" && !Array.isArray(child)) {
-          Object.assign(object, child);
+          for (const [childKey, value] of Object.entries(child)) assignMapping(object, childKey, value, strict);
         } else {
           throw new GoalBoardError(`Expected mapping below line ${line.number}.`);
         }
@@ -719,12 +730,7 @@ function parseScalar(text) {
     if (!inner) return [];
     return splitInlineArray(inner).map(parseScalar);
   }
-  if (
-    (text.startsWith("\"") && text.endsWith("\"")) ||
-    (text.startsWith("'") && text.endsWith("'"))
-  ) {
-    return unquote(text);
-  }
+  if (text.startsWith('"') || text.startsWith("'")) return unquote(text);
   if (text === "|" || text === ">") {
     throw new GoalBoardError("Block scalar YAML is not supported by this lightweight parser.");
   }
@@ -732,12 +738,32 @@ function parseScalar(text) {
 }
 
 function unquote(text) {
-  if (text.startsWith("'")) return text.slice(1, -1).replace(/''/g, "'");
-  return text
-    .slice(1, -1)
-    .replace(/\\"/g, "\"")
-    .replace(/\\n/g, "\n")
-    .replace(/\\\\/g, "\\");
+  const quote = text[0];
+  if (text.length < 2 || text.at(-1) !== quote) throw new GoalBoardError("Unclosed quoted scalar.");
+  let value = "";
+  // Consume each escape once. Chained replacements reinterpret the literal
+  // backslash in JSON.stringify's "\\\\node" as a newline escape.
+  const escapes = { '"': '"', "\\": "\\", "/": "/", b: "\b", f: "\f", n: "\n", r: "\r", t: "\t" };
+  for (let index = 1; index < text.length - 1; index++) {
+    const char = text[index];
+    if (char === quote) {
+      if (quote === "'" && text[index + 1] === "'" && index + 1 < text.length - 1) { value += "'"; index++; continue; }
+      throw new GoalBoardError("Unexpected quote in quoted scalar.");
+    }
+    if (quote === '"' && char === "\\") {
+      if (++index >= text.length - 1) throw new GoalBoardError("Incomplete quoted scalar escape.");
+      const escaped = text[index];
+      if (escaped === "u") {
+        const hex = text.slice(index + 1, index + 5);
+        if (!/^[a-fA-F0-9]{4}$/.test(hex)) throw new GoalBoardError("Malformed quoted scalar Unicode escape.");
+        value += String.fromCharCode(parseInt(hex, 16)); index += 4;
+      } else {
+        // Unknown legacy escapes were literal; keep that supported shape.
+        value += Object.hasOwn(escapes, escaped) ? escapes[escaped] : `\\${escaped}`;
+      }
+    } else value += char;
+  }
+  return value;
 }
 
 function splitInlineArray(text) {
@@ -746,8 +772,9 @@ function splitInlineArray(text) {
   let start = 0;
   for (let index = 0; index < text.length; index += 1) {
     const char = text[index];
-    const previous = text[index - 1];
-    if ((char === "\"" || char === "'") && previous !== "\\") {
+    if (quote === '"' && char === "\\") { index++; continue; }
+    if (quote === "'" && char === "'" && text[index + 1] === "'") { index++; continue; }
+    if (char === "\"" || char === "'") {
       quote = quote === char ? null : quote || char;
       continue;
     }
@@ -756,6 +783,7 @@ function splitInlineArray(text) {
       start = index + 1;
     }
   }
+  if (quote) throw new GoalBoardError("Unclosed quoted scalar in inline array.");
   values.push(text.slice(start).trim());
   return values;
 }

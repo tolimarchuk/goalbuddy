@@ -1,6 +1,6 @@
 {
   "name": "goalbuddy",
-  "version": "0.4.3",
+  "version": "0.5.0",
   "description": "A goal operating loop for Codex and Claude Code: goal oracles, local boards, receipts, and verification.",
   "type": "module",
   "bin": {
@@ -20,8 +20,8 @@
     "goalbuddy"
   ],
   "scripts": {
-    "check": "node --check internal/cli/*.mjs goalbuddy/scripts/*.mjs goalbuddy/surfaces/local-goal-board/scripts/*.mjs goalbuddy/surfaces/local-goal-board/scripts/lib/*.mjs && node --test internal/test/*.test.mjs goalbuddy/surfaces/local-goal-board/test/*.test.mjs",
-    "test": "node --test internal/test/*.test.mjs goalbuddy/surfaces/local-goal-board/test/*.test.mjs",
+    "check": "node internal/cli/check.mjs",
+    "test": "node internal/cli/check.mjs --tests-only",
     "pack:dry-run": "npm pack --dry-run",
     "sync:plugin": "node internal/cli/sync-skill-tree.mjs --write",
     "postinstall": "node internal/cli/postinstall.mjs",

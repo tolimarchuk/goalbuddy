@@ -6,6 +6,23 @@ Dates are public npm publication dates. Historical entries describe the product 
 
 Release history must describe product behavior with anonymized evidence. Never include client, customer, company, donor, or private project names. Public contributor handles may appear only for attribution.
 
+## 0.5.0: Verified Completion and Installer Integrity (Unreleased; publication pending)
+
+This candidate combines the unpublished 0.4.4 installer work with a behavior-changing completion and dispatch repair. There was no 0.4.4 publication. Earlier completion claims are preserved as history; they are not automatically valid under 0.5.0.
+
+- **One observed acceptance check.** An authorized active final audit records the exact validator command once and consumes that proof in its receipt. Completion rejects failed, missing, stale or contradictory evidence and changed outcome, validator, declared inputs or board state. Existing finalized audits need a fresh authorized final audit; keep their old receipts and attempts.
+- **Concrete validators and declared dependencies.** Use an exact file such as `node test/acceptance.mjs`, not `node .` or `node checks/`. Declare additional imports/configuration in `acceptance.inputs`. Evidence reports observation limits; it cannot establish arbitrary shell behavior, undeclared dependencies, external-service state or whether a green check proves the intended outcome. See the [practical migration](README.md#upgrading-to-050).
+- **Dispatch checks the work it can observe.** Worker writes are checked against `allowed_files`; Scout/Judge work must remain read-only. Goal controls and semantic Git state are checked, including dirty/untracked work and linked worktrees. Ignored/generated exclusions stay visible, and failed inspection or timeout cleanup cannot become proven success. Partial changes remain available for recovery.
+- **Boards warn about process-heavy work.** Advisory warnings from #46 identify oversized boards and repeated preparation/audit work with few Worker slices. They prompt inspection without invalidating research or decision goals.
+
+- **Published content must match its release tag.** The release workflow now compares the extracted npm package and exact Git tag by packaged file path and SHA-256 hash before publication, then repeats the same registry-versus-tag check after publication. This would reject the known 0.4.2 mismatch while accepting 0.4.3.
+- **Installer success now means proven final state.** Install, update, doctor, and reset retain their existing JSON fields and add one shared result contract with the selected install model, exact installed path and version, proof checks, fallback reason, warnings, and a structured error. Multi-target commands fail when either requested target is unproven.
+- **Native paths retain safe fallbacks.** Codex creates its resolved home before probing the CLI and uses an atomic bundled-copy fallback unless the CLI's exact installed state is proven. Claude Code keeps existing loose installs on loose files, prefers its CLI only for clean or existing-plugin homes, and rejects mixed state.
+- **Codex reset preserves modified agents.** It refuses removal before changing configuration or cache when an installed GoalBuddy agent does not match the bundled file.
+- **Claude reset is ownership-safe.** Native removal must be proven through the Claude Code CLI. Loose reset removes only byte-matching GoalBuddy files and preserves modified or unproven user files.
+- **The Codex plugin can be uninstalled from the plugin catalog again.** The marketplace entry declared `INSTALLED_BY_DEFAULT`, which Codex reads as admin-managed: the catalog labelled GoalBuddy "Installed by admin" and replaced its uninstall action with a disabled row. GoalBuddy is user-installed, so the entry now declares `AVAILABLE`.
+- **A downgrade no longer keeps the newer Codex plugin live.** Install removed only the version directory it was about to write, but Codex serves the highest version directory it finds under the plugin cache, so a directory left behind by a newer install kept being served. Install now prunes stale sibling version directories the way Codex's own installer does, and leaves directories that are not valid version segments alone. Cache inspection selects the bundled path before any native operation when unrelated sibling directories or files would otherwise be removed. Unproven inspection fails without installation.
+
 ## 0.4.3: Restore Claude's Native `/goal` (2026-08-05)
 
 - **Claude Code keeps its native `/goal`.** GoalBuddy now installs its execution loop as `/goalbuddy`, removing the namespace collision introduced in 0.4.0.

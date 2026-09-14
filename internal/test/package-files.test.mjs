@@ -84,7 +84,7 @@ test("the packed npm artifact installs the Claude contract and role agents", () 
       "--json",
     ], {
       encoding: "utf8",
-      env: { ...process.env, GOALBUDDY_SKIP_POSTINSTALL: "1" },
+      env: { ...process.env, GOALBUDDY_SKIP_POSTINSTALL: "1", GOALBUDDY_TEST_DISABLE_CLAUDE_CLI: "1" },
     });
     assert.equal(cli.status, 0, cli.stderr || cli.stdout);
     const report = JSON.parse(cli.stdout);

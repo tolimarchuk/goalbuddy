@@ -42,26 +42,46 @@ Starting in `0.3.0`, the installer is target-aware: `npx goalbuddy` installs int
 
 ## Release Flow
 
-1. Update `package.json` and both plugin manifest versions, then add the new release section to the top of `CHANGELOG.md`.
-2. Run local checks:
+1. Confirm the version is unused with `npm view goalbuddy versions --json` and `npm view goalbuddy version`. Check safe owner access with `npm whoami`. Select the version locally; that does not authorize publishing. Update `package.json` and both plugin manifests together. The marketplaces use local plugin references and do not carry separate versions.
+2. Add the candidate at the top of `CHANGELOG.md` with **Unreleased; publication pending**. Consolidate unpublished candidate notes into it; never invent a historical release or edit published sections. For 0.5.0, include the completion behavior change and [migration instructions](../../README.md#upgrading-to-050).
+3. Run local checks, inspect the complete tarball file list and preserve its SHA-256 and extracted manifest:
 
 ```bash
 npm run check
+node internal/cli/sync-skill-tree.mjs
 npm run pack:dry-run
 node internal/cli/check-publish-version.mjs
+npm pack --ignore-scripts --json --pack-destination <scratch>
+node internal/cli/check-package-identity.mjs --tarball <scratch>/goalbuddy-0.5.0.tgz --manifest <scratch>/manifest.json
 ```
 
-3. Commit and push the version and changelog changes together.
-4. Create and publish a GitHub release whose tag matches the package version, for example `v0.4.3`, using the matching `CHANGELOG.md` section as its release body. The workflow refuses to publish when the release tag and `package.json` version differ.
-5. Confirm the GitHub Actions workflow `Publish npm package` completed.
-6. Verify npm:
+The identity gate compares packaged paths and SHA-256 content. Also inspect file modes, canonical/plugin parity, dependency-free runtime and exclusion of private/task/client artifacts. Check syntax for each JavaScript file individually. Test the declared Node 18 floor and workflow Node 24. The test workflow prepares Ubuntu and Windows jobs on Node 18 and Node 24. Require the actual candidate Windows jobs, including command-shim and installer checks, to pass before release; macOS tests do not establish Windows behavior.
+
+4. Exercise the packed CLI with explicit `--codex-home <scratch>/codex` and `--claude-home <scratch>/claude`. Set native `CODEX_HOME` and `CLAUDE_CONFIG_DIR` to the same disposable targets, keep any plugin-cache override inside scratch, and verify isolation before native operations. Check install/update, fallback, exact contents/version, doctor, downgrade, partial failure and reset with unrelated/modified sentinels. No real-home installation is needed for release verification. File readback, native plugin reporting and a model loading the candidate are separate claims; an exit code or stale login status alone proves none of them.
+5. Have the release owner review and commit the accepted source, retain contributor ancestry, and run the full suite on the exact commit. Before an authorized public tag exists, compare against that commit:
 
 ```bash
-npm view goalbuddy name version dist-tags repository bin --json
-npx goalbuddy --help
-npx goalbuddy doctor --target codex
-npx goalbuddy doctor --target claude
+node internal/cli/check-package-identity.mjs --package <scratch>/goalbuddy-0.5.0.tgz --git-ref <accepted-release-commit>
 ```
+
+A disposable private Git fixture can test an uncommitted candidate, but it is provisional evidence. It does not replace this exact-commit check or public tag identity.
+
+6. Only with publication authority, push the accepted commit, create the matching immutable `v0.5.0` tag and publish the GitHub release from the changelog copy. The release-only workflow checks tag/version and package/tag identity before npm publication. Confirm its exact commit and Node 18/24 CI results. The date stays pending until npm publication is observed; record the actual publication date afterward in a follow-up changelog commit, without moving the tag or repacking the release.
+7. Confirm the workflow and read back the immutable registry version against the tag:
+
+```bash
+npm view goalbuddy@0.5.0 name version dist repository bin --json
+npm view goalbuddy dist-tags --json
+node internal/cli/check-package-identity.mjs --package goalbuddy@0.5.0 --git-ref v0.5.0 --manifest <scratch>/published-manifest.json
+```
+
+Check public tag/commit, npm tarball integrity and provenance, `latest`, workflow result and installed CLI behavior. A published version with failed readback is a release-integrity incident, not a successful release. Close artifact-integrity issues only after this public evidence exists.
+
+## Authentication and Recovery
+
+An `E401` from `npm whoami`, or `E401`/`E403`/`E404` after a publish tarball is built, requires owner authentication/permission investigation first. The owner should run `npm login` for the correct account, verify `npm whoami`, and inspect the package's publisher permissions. Do not bump versions or repeatedly run plain `npm publish` to repair authentication. The package already declares public access.
+
+Do not rewrite published versions, tags, receipts or completion evidence. If publication did not occur, repair and revalidate the pending candidate. Once a version is public, use a separately reviewed versioned forward fix; preserve the failed artifact and readback evidence. A downgrade can restore older code but cannot make historical completion claims satisfy the 0.5.0 protocol. Trusted-publisher changes and external recovery actions remain owner-authorized operations.
 
 ## Provenance Expectations
 

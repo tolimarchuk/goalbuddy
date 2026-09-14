@@ -15,6 +15,8 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
       - name: Set up Node.js
         uses: actions/setup-node@v6
@@ -42,9 +44,12 @@ jobs:
           fi
 
       - name: Verify package
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
           npm run check
           npm run pack:dry-run
+          node internal/cli/check-package-identity.mjs --package . --git-ref "$RELEASE_TAG"
 
       - name: Check npm publish status
         id: npm_status
@@ -63,3 +68,14 @@ jobs:
       - name: Publish
         if: steps.npm_status.outputs.already_published != 'true'
         run: npm publish
+
+      - name: Verify published package matches the release tag
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          package_version="$(node -p "require('./package.json').version")"
+          for attempt in 1 2 3 4 5; do
+            node internal/cli/check-package-identity.mjs --package "goalbuddy@$package_version" --git-ref "$RELEASE_TAG" && exit 0
+            if [ "$attempt" -lt 5 ]; then sleep 10; fi
+          done
+          exit 1

@@ -1,8 +1,12 @@
 #!/usr/bin/env node
-import { existsSync, statSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { assertBoardRevision, checkAcceptanceProof } from "./acceptance-proof.mjs";
+
+import { parseBoard } from "./strict-data.mjs";
+import { sha256 } from "./file-snapshot.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const inputPath = process.argv.slice(2).find((arg) => !arg.startsWith("-"));
@@ -16,6 +20,9 @@ const goalPath = resolve(inputPath);
 const statePath = existsSync(goalPath) && statSync(goalPath).isDirectory()
   ? join(goalPath, "state.yaml")
   : goalPath;
+let revision;
+try { revision = readFileSync(statePath); parseBoard(revision.toString("utf8")); }
+catch (error) { emit({ ok: false, can_stop: false, reason: "invalid_goal_state", errors: [error.message] }, 1); }
 const checker = join(__dirname, "check-goal-state.mjs");
 const checked = spawnSync(process.execPath, [checker, statePath], {
   encoding: "utf8",
@@ -34,7 +41,7 @@ try {
   }, 1);
 }
 
-if (checked.status !== 0 || !state.ok) {
+if (checked.status !== 0 || !state.ok || state.state_sha256 !== sha256(revision)) {
   emit({
     ok: false,
     can_stop: false,
@@ -69,6 +76,16 @@ if (state.goal_status === "blocked") {
   }, 0);
 }
 
+const acceptance = checkAcceptanceProof(statePath, revision);
+if (!acceptance.ok) {
+  emit({
+    ok: false, can_stop: false, reason: "acceptance_not_proven",
+    state_path: statePath, goal_status: state.goal_status, active_task: state.active_task,
+    errors: acceptance.errors,
+    next: "Preserve historical receipts. Repair or resume the outcome, then record a new authorized acceptance attempt while the final audit is active, then have its receipt consume that evidence. See references/goal-execution.md.",
+  }, 1);
+}
+
 emit({
   ok: true,
   can_stop: true,
@@ -76,9 +93,14 @@ emit({
   state_path: statePath,
   goal_status: state.goal_status,
   active_task: state.active_task,
+  acceptance,
 }, 0);
 
 function emit(result, code) {
+  if (result.can_stop) {
+    try { assertBoardRevision(statePath, revision); result.board_revision = sha256(revision); }
+    catch (error) { result = { ok: false, can_stop: false, reason: "board_revision_changed", errors: [error.message] }; code = 1; }
+  }
   if (json) {
     console.log(JSON.stringify(result, null, 2));
   } else if (result.can_stop) {

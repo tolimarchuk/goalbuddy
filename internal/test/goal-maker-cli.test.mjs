@@ -4,6 +4,7 @@ import { delimiter, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 
 const cli = resolve("internal/cli/goal-maker.mjs");
 const packageVersion = JSON.parse(readFileSync("package.json", "utf8")).version;
@@ -24,6 +25,9 @@ function runGoalMaker(args, options = {}) {
 function testEnv(env) {
   const result = { ...env };
   delete result.GITHUB_TOKEN;
+  if (result.GOALBUDDY_TEST_DISABLE_CLAUDE_CLI === undefined) {
+    result.GOALBUDDY_TEST_DISABLE_CLAUDE_CLI = "1";
+  }
   return result;
 }
 
@@ -984,11 +988,10 @@ test("reset removes only GoalBuddy-owned Codex runtime surfaces", () => {
 
     const agentsRoot = join(codexHome, "agents");
     mkdirSync(agentsRoot, { recursive: true });
-    for (const file of ["goal_judge.toml", "goal_scout.toml", "other.toml"]) {
-      writeFileSync(join(agentsRoot, file), `${file}\n`);
+    for (const file of ["goal_judge.toml", "goal_scout.toml", "goal_worker.toml"]) {
+      writeFileSync(join(agentsRoot, file), readFileSync(join("goalbuddy", "agents", file)));
     }
-    mkdirSync(join(agentsRoot, "goal_worker.toml"), { recursive: true });
-    writeFileSync(join(agentsRoot, "goal_worker.toml", "sentinel.txt"), "corrupt agent path\n");
+    writeFileSync(join(agentsRoot, "other.toml"), "unrelated user agent\n");
 
     const staleSkill = join(codexHome, "skills", "goalbuddy");
     const staleAlias = join(codexHome, "skills", "goal-maker");
@@ -1058,6 +1061,58 @@ test("plugin install ignores non-version cache directories", () => {
     const reinstall = runGoalMaker(["plugin", "install", "--codex-home", codexHome, "--json"], { env });
     assert.equal(reinstall.status, 0, reinstall.stderr || reinstall.stdout);
     assert.equal(JSON.parse(reinstall.stdout).version, packageVersion);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("plugin install removes a newer stale version directory", () => {
+  const root = mkdtempSync(join(tmpdir(), "goal-maker-cli-test-"));
+  try {
+    const codexHome = join(root, "codex-home");
+    const env = fakeCodexEnv(root);
+
+    const install = runGoalMaker(["plugin", "install", "--codex-home", codexHome, "--json"], { env });
+    assert.equal(install.status, 0, install.stderr || install.stdout);
+
+    // simulate a downgrade: a directory left behind by a newer install. Codex activates the highest
+    // version it finds, so this would keep being served instead of the version just installed.
+    const versionsRoot = join(codexHome, "plugins", "cache", "goalbuddy", "goalbuddy");
+    const staleVersion = join(versionsRoot, "9.9.9");
+    mkdirSync(staleVersion, { recursive: true });
+    writeFileSync(join(staleVersion, "marker.txt"), "stale\n");
+
+    const reinstall = runGoalMaker(["plugin", "install", "--codex-home", codexHome, "--json"], { env });
+    assert.equal(reinstall.status, 0, reinstall.stderr || reinstall.stdout);
+
+    const report = JSON.parse(reinstall.stdout);
+    assert.ok(report.removed_stale_version_paths.includes(staleVersion), JSON.stringify(report.removed_stale_version_paths));
+    assert.equal(existsSync(staleVersion), false);
+    assert.deepEqual(readdirSync(versionsRoot).sort(), [packageVersion]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("plugin install leaves directories that are not plugin versions alone", () => {
+  const root = mkdtempSync(join(tmpdir(), "goal-maker-cli-test-"));
+  try {
+    const codexHome = join(root, "codex-home");
+    const env = fakeCodexEnv(root);
+
+    const install = runGoalMaker(["plugin", "install", "--codex-home", codexHome, "--json"], { env });
+    assert.equal(install.status, 0, install.stderr || install.stdout);
+
+    // Codex only activates directories whose name is a valid version segment, so anything else is
+    // not ours to delete.
+    const versionsRoot = join(codexHome, "plugins", "cache", "goalbuddy", "goalbuddy");
+    const unrelated = join(versionsRoot, "notes for me");
+    mkdirSync(unrelated, { recursive: true });
+
+    const reinstall = runGoalMaker(["plugin", "install", "--codex-home", codexHome, "--json"], { env });
+    assert.equal(reinstall.status, 0, reinstall.stderr || reinstall.stdout);
+    assert.equal(existsSync(unrelated), true);
+    assert.deepEqual(JSON.parse(reinstall.stdout).removed_stale_version_paths, []);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -1413,7 +1468,10 @@ test("install removes an old GoalBuddy-owned /goal command", () => {
     const legacyCommand = join(claudeHome, "commands", "goal.md");
     mkdirSync(join(claudeHome, "commands"), { recursive: true });
     const legacyBody = readFileSync("plugins/goalbuddy/commands/goalbuddy.md", "utf8")
+      // Reconstruct the exact published LF artifact, independent of checkout EOLs.
+      .replaceAll("\r\n", "\n")
       .replace("Run the GoalBuddy execution loop.\n", "Run the GoalBuddy `/goal` execution loop.\n");
+    assert.equal(createHash("sha256").update(legacyBody).digest("hex"), "586a0839302239858cce64f954666e8690c5ddef036e397adfd9456eed4738e2");
     writeFileSync(legacyCommand, legacyBody);
 
     const result = runGoalMaker(["install", "--target", "claude", "--claude-home", claudeHome, "--json"]);

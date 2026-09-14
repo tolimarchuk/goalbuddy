@@ -66,7 +66,7 @@ Boards can also mix vendors within a single run — a Claude judge and a Codex w
 npx goalbuddy dispatch docs/goals/<slug> --to codex
 ```
 
-`dispatch` renders the active task's prompt, runs the target CLI headless (`codex` or `claude-code`), extracts the returned receipt, and verifies write scope mechanically with git: worker changes must stay inside the task's `allowed_files`, and read-only roles must change nothing. The dispatcher never edits the board — the PM records the receipt, stamped with the harness that earned it.
+`dispatch` renders the active task's prompt, runs the target CLI headless (`codex` or `claude-code`), extracts the returned receipt, and compares source contents/state and semantic Git state before and after, including existing dirty and untracked work in linked worktrees. Workers must stay inside `allowed_files`; Scout/Judge must change nothing. Goal controls are protected; the report explicitly lists ignored/generated and Git-storage exclusions. Failed required inspection leaves scope unproven. Changes are preserved for PM recovery. See the [execution contract](goalbuddy/references/goal-execution.md) for inspection limits and receipt handling.
 
 ## Codex Install Model
 
@@ -81,6 +81,8 @@ For Codex, the canonical install is the native plugin plus bundled agents:
 
 The Codex plugin bundles `$goal-prep`; a clean Codex install should not need personal `~/.codex/skills/goalbuddy` or `~/.codex/skills/goal-maker` folders. Native Codex `/goal` is a separate OpenAI-gated feature. GoalBuddy prepares local boards and handoff prompts for it, but it does not enable or replace native `/goal`.
 
+Install and update inspect the Codex cache before invoking its native installer. Non-version sibling directories and sibling files select the verified bundled path, preserving their contents and modes. Unproven cache inspection fails before installation; ordinary caches retain native installation. The result reports why fallback was selected.
+
 To verify a Codex install:
 
 ```bash
@@ -93,7 +95,43 @@ To remove GoalBuddy-owned Codex runtime surfaces:
 npx goalbuddy reset --target codex
 ```
 
-Native `codex plugin remove goalbuddy@goalbuddy` only removes the native plugin surface. GoalBuddy also owns the `goal_*.toml` agent files it installed, its Codex plugin cache, its marketplace entry, and old personal skill folders from earlier installs. Use `goalbuddy reset --target codex` when you want those GoalBuddy-owned files removed too.
+Codex reset preserves modified or unproven agent files and returns a failure before changing configuration or cache. Review those files and use the package version matching the installed agents before retrying. Native `codex plugin remove goalbuddy@goalbuddy` only removes the native plugin surface. GoalBuddy also owns the `goal_*.toml` agent files it installed, its Codex plugin cache, its marketplace entry, and old personal skill folders from earlier installs. Use `goalbuddy reset --target codex` when you want those GoalBuddy-owned files removed too.
+
+## Claude Code Install Model
+
+GoalBuddy uses Claude Code's native plugin installer for a clean home when the `claude` CLI can prove the exact bundled version, skill, agents, and `/goalbuddy` command. Existing loose-file installs continue updating in place, and a clean home falls back to the same loose-file layout when the CLI is unavailable. GoalBuddy never mixes the two models automatically; `doctor` reports mixed or incomplete state as a failure.
+
+```bash
+npx goalbuddy doctor --target claude
+npx goalbuddy reset --target claude
+```
+
+Reset removes a native plugin through the Claude Code CLI. For loose installs, it removes only files whose contents still match GoalBuddy's bundled files; modified or unproven files are preserved and reported.
+
+Installer JSON remains backward compatible and now includes a `result` object for each requested target. Its `ok` value comes from final filesystem and configuration readback, so a CLI exit code or metadata record by itself is never reported as a completed install.
+
+## Upgrading to 0.5.0
+
+0.5.0 is an unreleased candidate; npm latest remains 0.4.3 until publication. After release, use `npx goalbuddy@0.5.0 update --target codex` or `npx goalbuddy@0.5.0 update --target claude`, then restart the client and run the matching `doctor` command. An older marketplace copy can trigger a verified bundled Codex fallback. Claude falls back to loose files only when partial plugin state is proven absent; otherwise installation fails with the remaining state reported. Read `result.ok`, `fallback`, `warnings` and `error`; a partial or failed target makes the command fail even if the other target succeeds.
+
+Completion now requires observed evidence for the original outcome. Preserve historical receipts and verification attempts. If a final audit was already finalized, authorize a fresh final-audit task; do not edit old proof to make it pass. On the active audit, declare the exact check and every additional local dependency it needs, for example:
+
+```yaml
+acceptance:
+  command: ["node", "test/acceptance.mjs"]
+  artifacts: ["src"]
+  inputs: ["test/helpers.mjs", "config/test.json"]
+```
+
+Paths must exist in the authorized workspace. With `<skill-path>` pointing to the installed `goal-prep` skill, run the declared argv once:
+
+```bash
+node <skill-path>/scripts/record-acceptance.mjs docs/goals/<slug> -- node test/acceptance.mjs
+```
+
+Use the returned `acceptance_proof` and `acceptance_sha256` in the final receipt, then apply it through `goalbuddy receipt`; the stop check consumes that observation without rerunning the validator. A failed observation leaves the outcome incomplete. Repair the cause and obtain fresh evidence under the audit contract. `node .`, `node checks/` and shell composition are not concrete validators: name the actual file, and declare its imports/configuration in `inputs`.
+
+The recorder binds local files and declared inputs and displays exclusions. It cannot infer every dependency, observe all external state, or decide whether a passing test satisfies the person's intent. See the [execution contract](goalbuddy/references/goal-execution.md#one-observed-final-verification) for authorization, receipt fields and recovery.
 
 ## What It Creates
 
@@ -135,6 +173,8 @@ Judge chooses the largest safe useful slice.
 Worker completes the whole assigned slice and leaves a receipt.
 
 The execution command keeps the loop honest until a final Judge/PM audit maps receipts and verification back to the oracle and records the full outcome complete.
+
+Completion uses one authorized verification on the active final-audit task through `record-acceptance.mjs`; the final audit consumes its evidence without rerunning the command. The stop gate checks current outcome, validator/input bindings and board revision. This changes completion behavior: historical unverified claims stay intact but no longer authorize stopping. See the [verification and rollout contract](goalbuddy/references/goal-execution.md#one-observed-final-verification). Valid terminal blocks remain distinct from completion.
 
 ## Slice Sizing
 
