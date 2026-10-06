@@ -17,7 +17,9 @@ test("GoalBuddy plugin is exposed through a Codex marketplace manifest", () => {
   assert.equal(entry.name, "goalbuddy");
   assert.equal(entry.source.source, "local");
   assert.equal(entry.source.path, "./plugins/goalbuddy");
-  assert.equal(entry.policy.installation, "INSTALLED_BY_DEFAULT");
+  // Codex reads INSTALLED_BY_DEFAULT as admin-managed: it labels the plugin "Installed by admin"
+  // and replaces the uninstall action with a disabled row. GoalBuddy is user-installed.
+  assert.equal(entry.policy.installation, "AVAILABLE");
   assert.equal(entry.category, "Coding");
 });
 

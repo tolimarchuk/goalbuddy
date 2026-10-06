@@ -6,6 +6,10 @@ Dates are public npm publication dates. Historical entries describe the product 
 
 Release history must describe product behavior with anonymized evidence. Never include client, customer, company, donor, or private project names. Public contributor handles may appear only for attribution.
 
+## Unreleased
+
+- **The Codex plugin can be uninstalled from the plugin catalog again.** The marketplace entry declared `INSTALLED_BY_DEFAULT`, which Codex reads as admin-managed: the catalog labelled GoalBuddy "Installed by admin" and replaced its uninstall action with a disabled row. GoalBuddy is user-installed, so the entry now declares `AVAILABLE`.
+
 ## 0.4.3: Restore Claude's Native `/goal` (2026-08-05)
 
 - **Claude Code keeps its native `/goal`.** GoalBuddy now installs its execution loop as `/goalbuddy`, removing the namespace collision introduced in 0.4.0.
