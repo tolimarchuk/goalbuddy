@@ -79,6 +79,15 @@ For Codex, the canonical install is the native plugin plus bundled agents:
 ~/.codex/agents/goal_worker.toml
 ```
 
+The install runs through the `codex` CLI:
+
+```bash
+codex plugin marketplace add tolibear/goalbuddy
+codex plugin add goalbuddy@goalbuddy
+```
+
+Codex stages the plugin, prunes superseded versions, migrates the plugin's commands into skills, and enables it in `config.toml` itself. Without a working `codex` CLI the installer copies the bundled tree into the plugin cache instead and reports that it did, so an offline install still produces a loadable plugin.
+
 The Codex plugin bundles `$goal-prep`; a clean Codex install should not need personal `~/.codex/skills/goalbuddy` or `~/.codex/skills/goal-maker` folders. Native Codex `/goal` is a separate OpenAI-gated feature. GoalBuddy prepares local boards and handoff prompts for it, but it does not enable or replace native `/goal`.
 
 To verify a Codex install:

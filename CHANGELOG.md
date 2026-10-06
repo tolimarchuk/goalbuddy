@@ -6,6 +6,11 @@ Dates are public npm publication dates. Historical entries describe the product 
 
 Release history must describe product behavior with anonymized evidence. Never include client, customer, company, donor, or private project names. Public contributor handles may appear only for attribution.
 
+## Unreleased
+
+- **Codex installs through its own CLI.** `codex plugin add` now performs the install against the published marketplace, the same source the docs name, so the entry written into your `config.toml` stays portable. Codex stages the tree and renames it into place, prunes superseded versions, migrates the plugin's `commands/` into skills, and writes the config enablement, instead of GoalBuddy re-implementing those steps. When the `codex` CLI is missing or cannot install, the installer falls back to copying the bundled tree and says which model it used.
+- **A downgrade no longer keeps the newer Codex plugin live.** Install removed only the version directory it was about to write, but Codex serves the highest version directory it finds under the plugin cache, so a directory left behind by a newer install kept being served. Install now prunes stale sibling version directories the way Codex's own installer does, and leaves directories that are not valid version segments alone.
+
 ## 0.4.3: Restore Claude's Native `/goal` (2026-08-05)
 
 - **Claude Code keeps its native `/goal`.** GoalBuddy now installs its execution loop as `/goalbuddy`, removing the namespace collision introduced in 0.4.0.
