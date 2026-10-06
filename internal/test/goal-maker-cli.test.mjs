@@ -1063,6 +1063,58 @@ test("plugin install ignores non-version cache directories", () => {
   }
 });
 
+test("plugin install removes a newer stale version directory", () => {
+  const root = mkdtempSync(join(tmpdir(), "goal-maker-cli-test-"));
+  try {
+    const codexHome = join(root, "codex-home");
+    const env = fakeCodexEnv(root);
+
+    const install = runGoalMaker(["plugin", "install", "--codex-home", codexHome, "--json"], { env });
+    assert.equal(install.status, 0, install.stderr || install.stdout);
+
+    // simulate a downgrade: a directory left behind by a newer install. Codex activates the highest
+    // version it finds, so this would keep being served instead of the version just installed.
+    const versionsRoot = join(codexHome, "plugins", "cache", "goalbuddy", "goalbuddy");
+    const staleVersion = join(versionsRoot, "9.9.9");
+    mkdirSync(staleVersion, { recursive: true });
+    writeFileSync(join(staleVersion, "marker.txt"), "stale\n");
+
+    const reinstall = runGoalMaker(["plugin", "install", "--codex-home", codexHome, "--json"], { env });
+    assert.equal(reinstall.status, 0, reinstall.stderr || reinstall.stdout);
+
+    const report = JSON.parse(reinstall.stdout);
+    assert.ok(report.removed_stale_version_paths.includes(staleVersion), JSON.stringify(report.removed_stale_version_paths));
+    assert.equal(existsSync(staleVersion), false);
+    assert.deepEqual(readdirSync(versionsRoot).sort(), [packageVersion]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("plugin install leaves directories that are not plugin versions alone", () => {
+  const root = mkdtempSync(join(tmpdir(), "goal-maker-cli-test-"));
+  try {
+    const codexHome = join(root, "codex-home");
+    const env = fakeCodexEnv(root);
+
+    const install = runGoalMaker(["plugin", "install", "--codex-home", codexHome, "--json"], { env });
+    assert.equal(install.status, 0, install.stderr || install.stdout);
+
+    // Codex only activates directories whose name is a valid version segment, so anything else is
+    // not ours to delete.
+    const versionsRoot = join(codexHome, "plugins", "cache", "goalbuddy", "goalbuddy");
+    const unrelated = join(versionsRoot, "notes for me");
+    mkdirSync(unrelated, { recursive: true });
+
+    const reinstall = runGoalMaker(["plugin", "install", "--codex-home", codexHome, "--json"], { env });
+    assert.equal(reinstall.status, 0, reinstall.stderr || reinstall.stdout);
+    assert.equal(existsSync(unrelated), true);
+    assert.deepEqual(JSON.parse(reinstall.stdout).removed_stale_version_paths, []);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("plugin reinstall does not leave empty preserved cache directories", () => {
   const root = mkdtempSync(join(tmpdir(), "goal-maker-cli-test-"));
   try {

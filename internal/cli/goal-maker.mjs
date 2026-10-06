@@ -977,6 +977,8 @@ function installPlugin({ quiet = false } = {}) {
   mkdirSync(dirname(pluginCachePath), { recursive: true });
   rmSync(pluginCachePath, { recursive: true, force: true });
   cpSync(pluginSource, pluginCachePath, { recursive: true });
+  // Prune only after the new version is in place, so a failed copy cannot leave the cache empty.
+  const removedStaleVersionPaths = pruneStalePluginVersions(pluginManifest.version);
   const removedLegacySkillPaths = cleanupLegacyCodexSkills();
   const configPath = enablePluginConfig();
   const agents = installAgents({ quiet: true });
@@ -992,6 +994,7 @@ function installPlugin({ quiet = false } = {}) {
     config_path: configPath,
     agents,
     removed_legacy_skill_paths: removedLegacySkillPaths,
+    removed_stale_version_paths: removedStaleVersionPaths,
   };
 
   if (hasFlag("--json") && !quiet) {
@@ -1008,6 +1011,9 @@ function installPlugin({ quiet = false } = {}) {
   console.log(`Agents: ${summarizeStatuses(report.agents)}`);
   if (report.removed_legacy_skill_paths.length) {
     console.log(`Removed legacy personal skills: ${report.removed_legacy_skill_paths.join(", ")}`);
+  }
+  if (report.removed_stale_version_paths.length) {
+    console.log(`Removed stale plugin versions: ${report.removed_stale_version_paths.join(", ")}`);
   }
   console.log("");
   console.log("Restart Codex, then use:");
@@ -1113,6 +1119,32 @@ function removeTomlTable(text, header) {
 
   if (!removed) return text;
   return output.join("\n").replace(/\n{3,}/g, "\n\n").replace(/\n*$/, "\n");
+}
+
+// Codex serves the highest version directory it finds under the plugin's cache root, so a directory
+// left behind by a newer install keeps being served after a downgrade. Codex's own installer prunes
+// siblings whenever it installs; this mirrors that so a hand-built cache cannot diverge.
+function pruneStalePluginVersions(installedVersion) {
+  const versionsRoot = dirname(pluginCacheRoot(installedVersion));
+  if (!existsSync(versionsRoot)) return [];
+
+  const removed = [];
+  for (const entry of readdirSync(versionsRoot, { withFileTypes: true })) {
+    if (!entry.isDirectory() || entry.name === installedVersion) continue;
+    if (!isPluginVersionSegment(entry.name)) continue;
+    const path = join(versionsRoot, entry.name);
+    rmSync(path, { recursive: true, force: true });
+    removed.push(path);
+  }
+  return removed;
+}
+
+// Mirrors Codex's validate_plugin_version_segment: non-empty, not a traversal, and limited to ASCII
+// letters, digits, `.`, `+`, `_`, and `-`. Anything else is not a version directory Codex would
+// activate, so it is left alone.
+function isPluginVersionSegment(name) {
+  if (!name || name === "." || name === "..") return false;
+  return /^[A-Za-z0-9._+-]+$/.test(name);
 }
 
 function pluginCacheOwnerRoot() {
