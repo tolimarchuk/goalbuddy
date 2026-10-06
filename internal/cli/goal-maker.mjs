@@ -29,9 +29,12 @@ const legacyClaudeGoalCommandHashes = new Set([
 ]);
 const skillSource = join(packageRoot, canonicalSkillDirectory);
 const claudePluginSource = join(packageRoot, "plugins", "goalbuddy");
+const defaultMarketplaceSource = "tolibear/goalbuddy";
 const packageInfo = JSON.parse(readFileSync(join(packageRoot, "package.json"), "utf8"));
 const defaultCodexHome = process.env.CODEX_HOME || join(homedir(), ".codex");
-const defaultClaudeHome = process.env.CLAUDE_HOME || join(homedir(), ".claude");
+// The `claude` CLI resolves its config directory from CLAUDE_CONFIG_DIR, so honor that first and
+// keep CLAUDE_HOME as the pre-existing fallback.
+const defaultClaudeHome = process.env.CLAUDE_CONFIG_DIR || process.env.CLAUDE_HOME || join(homedir(), ".claude");
 const requiredAgentFiles = [
   "goal_judge.toml",
   "goal_scout.toml",
@@ -102,7 +105,7 @@ async function main() {
       if (targetMode() === "codex") {
         installAgents();
       } else {
-        installClaudeAgents();
+        installClaudeAgentsCommand();
       }
       break;
     case "doctor":
@@ -121,11 +124,11 @@ async function main() {
         usage();
         break;
       }
-      if (targetMode() !== "codex") {
-        console.error("Reset currently supports --target codex only.");
-        process.exit(2);
+      if (targetMode() === "codex") {
+        resetCodex();
+      } else {
+        resetClaude();
       }
-      resetCodex();
       break;
     case "check-update":
     case "update-check":
@@ -304,7 +307,7 @@ Usage:
   ${canonicalCliName} update [--target claude|codex] [--claude-home <path>] [--codex-home <path>] [--json]
   ${canonicalCliName} agents [--target claude|codex] [--claude-home <path>] [--codex-home <path>] [--force]
   ${canonicalCliName} doctor [--target claude|codex] [--claude-home <path>] [--codex-home <path>] [--goal-ready]
-  ${canonicalCliName} reset --target codex [--codex-home <path>] [--json]
+  ${canonicalCliName} reset [--target claude|codex] [--claude-home <path>] [--codex-home <path>] [--json]
   ${canonicalCliName} check-update [--json]
   ${canonicalCliName} board <docs/goals/slug> [--host <host>] [--port <port>] [--once] [--json]
   ${canonicalCliName} init <slug> [--title "<Goal title>"] [--json]
@@ -318,8 +321,8 @@ Usage:
 Targets: by default, install/update prepares both Codex (~/.codex) and Claude Code (~/.claude). Use --target codex or --target claude to limit the command.
 
 Default:
-  ${canonicalCliName}                  Installs and enables Codex, then installs Claude Code skill + agents (skill surfaces /goal-prep).
-  ${canonicalCliName} --target claude  Installs ${canonicalProductName} for Claude Code (skill + agents; skill surfaces /goal-prep).
+  ${canonicalCliName}                  Installs the native Codex plugin, then the native Claude Code plugin (surfaces /goal-prep).
+  ${canonicalCliName} --target claude  Installs ${canonicalProductName} as the native Claude Code plugin (needs the claude CLI; surfaces /goal-prep).
   ${canonicalCliName} --target codex   Installs and enables the native Codex plugin.
 
 Compatibility:
@@ -389,84 +392,164 @@ function legacyClaudeGoalCommandPath() {
   return join(claudeHome(), "commands", "goal.md");
 }
 
-function installClaudeSkill({ quiet = false } = {}) {
-  const target = claudeSkillRoot();
-  if (!existsSync(skillSource)) {
-    console.error(`Skill payload not found: ${skillSource}`);
-    process.exit(1);
+function claudePluginId() {
+  return `${pluginName}@${pluginName}`;
+}
+
+function claudePluginsDir() {
+  // The `claude` CLI keeps plugin state under $CLAUDE_CODE_PLUGIN_CACHE_DIR when that is set and
+  // under <config-dir>/plugins otherwise. Match that precedence, tilde expansion included, so the
+  // reads below find the same files the CLI wrote.
+  const override = process.env.CLAUDE_CODE_PLUGIN_CACHE_DIR;
+  if (override) return override === "~" || override.startsWith("~/") ? homedir() + override.slice(1) : override;
+  return join(claudeHome(), "plugins");
+}
+
+function claudeKnownMarketplacesPath() {
+  return join(claudePluginsDir(), "known_marketplaces.json");
+}
+
+function claudeInstalledPluginsPath() {
+  return join(claudePluginsDir(), "installed_plugins.json");
+}
+
+function claudeSettingsPath() {
+  return join(claudeHome(), "settings.json");
+}
+
+function readJsonFile(path) {
+  if (!existsSync(path)) return null;
+  try {
+    return JSON.parse(readFileSync(path, "utf8"));
+  } catch {
+    return null;
   }
+}
 
-  const legacyTarget = legacyClaudeSkillRoot();
-  const previousMetadata = readInstallMetadata(target) || readInstallMetadata(legacyTarget);
-  const previousFingerprint = existsSync(target) ? directoryFingerprint(target, { exclude: installFingerprintExcludes() }) : "";
-
-  mkdirSync(dirname(target), { recursive: true });
-  rmSync(target, { recursive: true, force: true });
-  cpSync(skillSource, target, { recursive: true });
-  writeInstallMetadata(target, previousMetadata);
-
-  const legacyRemoved = existsSync(legacyTarget);
-  if (legacyRemoved) {
-    rmSync(legacyTarget, { recursive: true, force: true });
-    if (!quiet) console.log(`removed legacy ${legacyTarget} (skill now installs as ${canonicalSkillName})`);
+function claudeSpawnCommand(args, env) {
+  if (process.platform !== "win32") return { file: "claude", args };
+  const command = resolveWindowsCommand("claude", env);
+  if (!command) return { file: "claude", args };
+  if (/\.(?:cmd|bat)$/i.test(command)) {
+    const commandLine = [quoteWindowsCommandArg(command), ...args.map(quoteWindowsCommandArg)].join(" ");
+    return { file: commandLine, args: [], shell: true };
   }
+  return { file: command, args };
+}
 
-  const currentFingerprint = directoryFingerprint(target, { exclude: installFingerprintExcludes() });
-  const status = previousFingerprint
-    ? previousFingerprint === currentFingerprint ? "unchanged" : "updated"
-    : "installed";
-  if (!quiet) console.log(`Installed Claude Code ${canonicalProductName} skill to ${target}`);
-
+// The `claude` CLI reads its config directory from CLAUDE_CONFIG_DIR, so point it at the same home
+// this installer inspects.
+function runClaude(args) {
+  const env = { ...process.env, CLAUDE_CONFIG_DIR: claudeHome() };
+  const command = claudeSpawnCommand(args, env);
+  const result = spawnSync(command.file, command.args, {
+    encoding: "utf8",
+    env,
+    shell: command.shell || false,
+    // `marketplace add` and `install` clone from GitHub; bound the wait so a stalled network cannot
+    // hang `npx goalbuddy` indefinitely (a timeout reads as a failed call).
+    timeout: 120000,
+  });
   return {
-    status,
-    path: target,
-    previous_version: previousMetadata?.package_version || "",
-    current_version: packageInfo.version,
-    removed_legacy_skill_path: legacyRemoved ? legacyTarget : "",
+    ok: result.status === 0,
+    status: result.status,
+    stdout: result.stdout || "",
+    stderr: result.stderr || result.error?.message || "",
   };
 }
 
-function installClaudeAgents({ quiet = false } = {}) {
-  const source = join(claudePluginSource, "agents");
-  const target = claudeAgentsRoot();
-  const force = hasFlag("--force") || command === "update" || command === "install" || command === "default";
-  mkdirSync(target, { recursive: true });
+function claudeCliAvailable() {
+  return runClaude(["--version"]).ok;
+}
 
-  const results = [];
-  if (!existsSync(source)) return results;
-  for (const file of readdirSync(source)) {
-    if (!file.endsWith(".md")) continue;
-    const dest = join(target, file);
-    const sourceHash = sha256(readFileSync(join(source, file)));
-    const previousHash = existsSync(dest) ? sha256(readFileSync(dest)) : "";
-    if (existsSync(dest) && !force) {
-      if (!quiet) console.log(`skip existing ${dest} (use --force to overwrite)`);
-      results.push({ file, status: "skipped", path: dest });
-      continue;
-    }
-    cpSync(join(source, file), dest);
-    const status = previousHash ? previousHash === sourceHash ? "unchanged" : "updated" : "installed";
-    if (!quiet) console.log(`installed ${dest}`);
-    results.push({ file, status, path: dest });
+function installedClaudePlugin() {
+  const data = readJsonFile(claudeInstalledPluginsPath());
+  const records = data?.plugins?.[claudePluginId()];
+  if (!Array.isArray(records)) return null;
+  return records.find((record) => record?.scope === "user") || records[0] || null;
+}
+
+// Copies an earlier GoalBuddy version wrote directly into the personal directories. The plugin now
+// owns all of these, so they are duplicates. Skill roots are matched by GoalBuddy's own directory
+// names; the agent and command files are matched by content marker so a same-named file the user
+// wrote themselves is never reported as ours.
+function goalbuddyLooseFiles() {
+  const found = [];
+  for (const dir of [claudeSkillRoot(), legacyClaudeSkillRoot()]) {
+    if (existsSync(dir)) found.push(dir);
   }
-  return results;
+  const agentsRoot = claudeAgentsRoot();
+  const namedFiles = [
+    ...requiredClaudeAgentFiles.map((file) => join(agentsRoot, file)),
+    claudeGoalCommandPath(),
+  ];
+  for (const path of namedFiles) {
+    if (existsSync(path) && fileHasGoalbuddyMarker(path)) found.push(path);
+  }
+  return found;
+}
+
+function fileHasGoalbuddyMarker(path) {
+  try {
+    return readFileSync(path, "utf8").includes(canonicalProductName);
+  } catch {
+    return false;
+  }
+}
+
+function installClaudePlugin() {
+  const source = optionValue("--source") || defaultMarketplaceSource;
+  const manifestPath = join(claudePluginSource, ".claude-plugin", "plugin.json");
+  if (!existsSync(manifestPath)) {
+    throw new Error(`Claude plugin manifest not found: ${manifestPath}`);
+  }
+  const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+  const pluginId = claudePluginId();
+  const warnings = [];
+
+  // Deliberately unpinned. `marketplace add owner/repo@<tag>` is supported, but a stored ref makes
+  // every later `marketplace update` re-fetch that same tag, which would silently freeze anyone who
+  // turns on auto-update. Tracking the marketplace's default branch is the normal contract and keeps
+  // the update decision with the user.
+  const marketplace = runClaude(["plugin", "marketplace", "add", source]);
+  if (!marketplace.ok) {
+    throw new Error(`Failed to add Claude plugin marketplace: ${firstLine(marketplace.stderr || marketplace.stdout)}`);
+  }
+  // `marketplace add` is a noop once the clone exists, so it does not pull new commits. Refresh the
+  // local checkout so `install` and `update` see the latest release.
+  runClaude(["plugin", "marketplace", "update", pluginName]);
+
+  const previous = installedClaudePlugin();
+  const install = runClaude(["plugin", "install", pluginId, "--scope", "user"]);
+  if (!install.ok) {
+    throw new Error(`Failed to install Claude plugin: ${firstLine(install.stderr || install.stdout)}`);
+  }
+  // `install` is a noop when the plugin is already present; `update` moves an existing install to
+  // the latest release.
+  const update = runClaude(["plugin", "update", pluginId]);
+  if (!update.ok) {
+    warnings.push(`\`claude plugin update ${pluginId}\` did not complete: ${firstLine(update.stderr || update.stdout)}`);
+  }
+
+  const installedRecord = installedClaudePlugin();
+
+  return {
+    mode: "plugin",
+    installed: true,
+    target: "claude",
+    plugin: pluginId,
+    version: installedRecord?.version || manifest.version,
+    previous_version: previous?.version || "",
+    claude_home: claudeHome(),
+    marketplace_source: source,
+    install_path: installedRecord?.installPath || "",
+    update_status: update.ok ? "ok" : "failed",
+    warnings,
+  };
 }
 
 function claudeGoalCommandPath() {
   return join(claudeHome(), "commands", "goalbuddy.md");
-}
-
-function installClaudeGoalCommand({ quiet = false } = {}) {
-  const source = join(claudePluginSource, "commands", "goalbuddy.md");
-  const target = claudeGoalCommandPath();
-  if (!existsSync(source)) return { status: "missing_source", path: target };
-  const sourceHash = sha256(readFileSync(source));
-  const previousHash = existsSync(target) ? sha256(readFileSync(target)) : "";
-  mkdirSync(dirname(target), { recursive: true });
-  cpSync(source, target);
-  const status = previousHash ? previousHash === sourceHash ? "unchanged" : "updated" : "installed";
-  if (!quiet) console.log(`installed ${target}`);
-  return { status, path: target };
 }
 
 function cleanupLegacyClaudeGoalCommand({ quiet = false } = {}) {
@@ -501,31 +584,83 @@ function cleanupLegacyClaudeCommands({ quiet = false } = {}) {
   return { removed: true, path: legacyPath };
 }
 
+// GoalBuddy installs into Claude Code as a native plugin. The plugin serves the skill, the
+// Scout/Judge/Worker subagents, and the /goalbuddy command out of its own versioned cache, so this
+// installer no longer writes anything into the personal directories. When the plugin cannot be
+// installed automatically it reports `unmanaged` and prints the in-app commands rather than falling
+// back to loose copies: a loose ~/.claude/skills/goal-prep reached through a ~/.agents/skills
+// symlink surfaces a duplicate goal-prep in Codex alongside the plugin's goalbuddy:goal-prep.
 async function buildClaudeInstallReport() {
   const quiet = true;
-  const report = {
+  // Unchanged from 0.4.3: the pre-0.4.3 loose /goal command is not a plugin-owned path, and leaving
+  // it in place keeps Claude Code's native /goal shadowed.
+  const legacyCleanups = {
+    legacy_goal_command_cleanup: cleanupLegacyClaudeGoalCommand({ quiet }),
+    legacy_commands_cleanup: cleanupLegacyClaudeCommands({ quiet }),
+  };
+
+  if (claudeCliAvailable()) {
+    try {
+      const plugin = installClaudePlugin();
+      return {
+        command,
+        target: "claude",
+        mode: "plugin",
+        package: {
+          name: packageInfo.name,
+          current_version: packageInfo.version,
+          previous_version: plugin.previous_version,
+        },
+        claude_home: claudeHome(),
+        plugin,
+        ...legacyCleanups,
+        loose_files: goalbuddyLooseFiles(),
+        warnings: claudeInstallWarnings(legacyCleanups, plugin.warnings),
+      };
+    } catch (error) {
+      return buildClaudeUnmanagedReport(legacyCleanups, [
+        `Native Claude plugin install failed (${error.message}). Re-run once resolved, or from inside Claude Code run: /plugin marketplace add ${defaultMarketplaceSource} then /plugin install ${claudePluginId()}.`,
+      ]);
+    }
+  }
+
+  return buildClaudeUnmanagedReport(legacyCleanups, [
+    `claude CLI not found on PATH. ${canonicalProductName} installs into Claude Code as a native plugin: install the Claude Code CLI and re-run, or from inside Claude Code run: /plugin marketplace add ${defaultMarketplaceSource} then /plugin install ${claudePluginId()}.`,
+  ]);
+}
+
+function buildClaudeUnmanagedReport(legacyCleanups, warnings) {
+  return {
     command,
     target: "claude",
+    mode: "unmanaged",
     package: {
       name: packageInfo.name,
       current_version: packageInfo.version,
+      previous_version: "",
     },
     claude_home: claudeHome(),
-    skill: installClaudeSkill({ quiet }),
-    agents: installClaudeAgents({ quiet }),
-    goal_command: installClaudeGoalCommand({ quiet }),
-    legacy_goal_command_cleanup: cleanupLegacyClaudeGoalCommand({ quiet }),
-    legacy_commands_cleanup: cleanupLegacyClaudeCommands({ quiet }),
-    warnings: [],
+    plugin: null,
+    ...legacyCleanups,
+    loose_files: goalbuddyLooseFiles(),
+    warnings: claudeInstallWarnings(legacyCleanups, warnings),
   };
+}
 
-  report.package.previous_version = report.skill.previous_version;
-  if (report.legacy_goal_command_cleanup.preserved) {
-    report.warnings.push(
-      `Preserved ${report.legacy_goal_command_cleanup.path} because it is not GoalBuddy-authored. Claude Code's native /goal may remain shadowed until you rename or remove that file.`,
+function claudeInstallWarnings(legacyCleanups, extra = []) {
+  const warnings = [...extra];
+  if (legacyCleanups.legacy_goal_command_cleanup.preserved) {
+    warnings.push(
+      `Preserved ${legacyCleanups.legacy_goal_command_cleanup.path} because it is not GoalBuddy-authored. Claude Code's native /goal may remain shadowed until you rename or remove that file.`,
     );
   }
-  return report;
+  const looseFiles = goalbuddyLooseFiles();
+  if (looseFiles.length) {
+    warnings.push(
+      `Loose ${canonicalProductName} files from an earlier version duplicate the plugin and can surface a duplicate skill in Codex through a ~/.agents/skills symlink: ${looseFiles.join(", ")}. Remove them once the plugin is installed.`,
+    );
+  }
+  return warnings;
 }
 
 async function installClaudeAll() {
@@ -575,52 +710,93 @@ async function installEverywhere() {
   if (!report.ok) process.exit(1);
 }
 
+// Reports plugin state. The installed record is read straight from installed_plugins.json, so this
+// works with or without the `claude` CLI on PATH. Loose copies from an earlier version are listed
+// because they duplicate the plugin and leak into Codex through a ~/.agents/skills symlink.
 function doctorClaude() {
-  const skillPath = join(claudeSkillRoot(), "SKILL.md");
-  const agentsPath = claudeAgentsRoot();
-  const installed = existsSync(skillPath);
-  const agents = existsSync(agentsPath)
-    ? readdirSync(agentsPath).filter((file) => file.startsWith("goal-") && file.endsWith(".md"))
-    : [];
-  const missingAgents = requiredClaudeAgentFiles.filter((file) => !agents.includes(file));
-  const staleAgents = requiredClaudeAgentFiles.filter((file) => {
-    const installedAgent = join(agentsPath, file);
-    const bundledAgent = join(claudePluginSource, "agents", file);
-    if (!existsSync(installedAgent) || !existsSync(bundledAgent)) return false;
-    return sha256(readFileSync(installedAgent)) !== sha256(readFileSync(bundledAgent));
-  });
-  const legacyCommandPath = legacyClaudeCommandPath();
-  const legacyCommandPresent = existsSync(legacyCommandPath);
-  const legacySkillPath = legacyClaudeSkillRoot();
-  const legacySkillPresent = existsSync(legacySkillPath);
-  const goalCommandPath = claudeGoalCommandPath();
-  const goalCommandPresent = existsSync(goalCommandPath);
+  const record = installedClaudePlugin();
+  const installed = Boolean(record);
+  const known = readJsonFile(claudeKnownMarketplacesPath()) || {};
+  const settings = readJsonFile(claudeSettingsPath()) || {};
+  const autoUpdateEnabled = known?.[pluginName]?.autoUpdate === true
+    || settings?.extraKnownMarketplaces?.[pluginName]?.autoUpdate === true;
+
   const legacyGoalCommandPath = legacyClaudeGoalCommandPath();
   const legacyGoalCommandPresent = existsSync(legacyGoalCommandPath);
   const legacyGoalCommandOwned = legacyGoalCommandPresent && fileIsLegacyGoalBuddyCommand(legacyGoalCommandPath);
+  const loosePaths = goalbuddyLooseFiles();
 
   console.log(JSON.stringify({
     target: "claude",
+    mode: "plugin",
     claude_home: claudeHome(),
-    skill_installed: installed,
-    skill_path: skillPath,
-    installed_agents: agents,
-    missing_agents: missingAgents,
-    stale_agents: staleAgents,
-    goal_command_present: goalCommandPresent,
-    goal_command_path: goalCommandPath,
+    claude_cli_available: claudeCliAvailable(),
+    plugin: claudePluginId(),
+    plugin_installed: installed,
+    installed_version: record?.version || "",
+    install_path: record?.installPath || "",
+    auto_update_enabled: autoUpdateEnabled,
     native_goal_available: !legacyGoalCommandPresent,
     legacy_goal_command_present: legacyGoalCommandPresent,
     legacy_goal_command_owned: legacyGoalCommandOwned,
     legacy_goal_command_path: legacyGoalCommandPath,
-    legacy_command_present: legacyCommandPresent,
-    legacy_command_path: legacyCommandPath,
-    legacy_skill_present: legacySkillPresent,
-    legacy_skill_path: legacySkillPath,
+    loose_files: loosePaths,
   }, null, 2));
 
-  const installOk = installed && missingAgents.length === 0 && staleAgents.length === 0 && goalCommandPresent && !legacyGoalCommandPresent && !legacyCommandPresent && !legacySkillPresent;
-  process.exit(installOk ? 0 : 1);
+  process.exit(installed && !legacyGoalCommandPresent && loosePaths.length === 0 ? 0 : 1);
+}
+
+// The Claude Scout/Judge/Worker subagents ship inside the plugin, so there is nothing to install as
+// loose personal files. Point at the plugin and report any loose leftovers.
+function installClaudeAgentsCommand() {
+  const looseFiles = goalbuddyLooseFiles();
+  if (hasFlag("--json")) {
+    printJson({ target: "claude", mode: "plugin", plugin: claudePluginId(), loose_files: looseFiles });
+    return;
+  }
+  console.log(`${canonicalProductName} Claude Code subagents ship inside the plugin.`);
+  console.log(`Install or update it from inside Claude Code: /plugin install ${claudePluginId()}`);
+  if (looseFiles.length) {
+    console.log(`Loose files from an earlier version remain: ${looseFiles.join(", ")}`);
+  }
+}
+
+// The plugin bundles everything it ships, so uninstalling it is the `claude` CLI's job. Delegate to
+// `plugin uninstall` and `marketplace remove`, which manage their own settings.json and
+// known_marketplaces.json entries.
+function resetClaude() {
+  const pluginId = claudePluginId();
+  const cliActions = [];
+  if (claudeCliAvailable()) {
+    const uninstall = runClaude(["plugin", "uninstall", pluginId]);
+    cliActions.push({ action: "plugin-uninstall", ok: uninstall.ok });
+    const removeMarket = runClaude(["plugin", "marketplace", "remove", pluginName]);
+    cliActions.push({ action: "marketplace-remove", ok: removeMarket.ok });
+  }
+
+  const report = {
+    target: "claude",
+    claude_home: claudeHome(),
+    plugin: pluginId,
+    claude_cli_available: cliActions.length > 0,
+    cli_actions: cliActions,
+    loose_files: goalbuddyLooseFiles(),
+  };
+
+  if (hasFlag("--json")) {
+    printJson(report);
+    return;
+  }
+
+  console.log(`Reset ${canonicalProductName} for Claude Code`);
+  if (cliActions.length === 0) {
+    console.log(`Plugin: claude CLI not found. Remove it with: claude plugin uninstall ${pluginId} && claude plugin marketplace remove ${pluginName}`);
+  } else {
+    for (const action of cliActions) console.log(`${action.action}: ${action.ok ? "ok" : "failed"}`);
+  }
+  if (report.loose_files.length) {
+    console.log(`Loose files from an earlier version remain: ${report.loose_files.join(", ")}`);
+  }
 }
 
 function printClaudeInstallReport(report) {
@@ -631,9 +807,16 @@ function printClaudeInstallReport(report) {
   console.log("");
   console.log(`${verb} ${canonicalProductName} for Claude Code${previous}`);
   console.log("");
-  console.log(`Skill: ${report.skill.status} at ${report.skill.path}`);
-  console.log(`Agents: ${summarizeStatuses(report.agents)}`);
-  console.log(`Command: /goalbuddy ${report.goal_command.status} at ${report.goal_command.path}`);
+  if (report.mode === "plugin") {
+    console.log(`Plugin: ${report.plugin.plugin} ${report.plugin.version}`);
+    console.log(`Marketplace: ${report.plugin.marketplace_source}`);
+    console.log(`Update with: npx ${canonicalCliName} update  (or enable auto-update in /plugin)`);
+  } else {
+    console.log(`${canonicalProductName} for Claude Code installs as a native plugin.`);
+    console.log("Finish install from inside Claude Code:");
+    console.log(`  /plugin marketplace add ${defaultMarketplaceSource}`);
+    console.log(`  /plugin install ${claudePluginId()}`);
+  }
   if (report.legacy_goal_command_cleanup?.removed) {
     console.log(`Removed legacy GoalBuddy command: ${report.legacy_goal_command_cleanup.path}`);
   }
@@ -1615,10 +1798,8 @@ function printEverywhereInstallReport(report) {
 
   if (report.claude?.ok === false) {
     console.log(`Claude Code: not completed (${report.claude.error})`);
-  } else if (report.claude) {
-    console.log(`Claude Code: skill ${report.claude.skill.status} at ${report.claude.skill.path}`);
-    console.log(`Claude Code agents: ${summarizeStatuses(report.claude.agents)}`);
-    console.log(`Claude Code command: /goalbuddy ${report.claude.goal_command.status} at ${report.claude.goal_command.path}`);
+  } else if (report.claude?.mode === "plugin") {
+    console.log(`Claude Code: plugin ${report.claude.plugin.version} installed`);
     if (report.claude.legacy_goal_command_cleanup?.removed) {
       console.log(`Claude Code: removed legacy GoalBuddy command at ${report.claude.legacy_goal_command_cleanup.path}`);
     }
@@ -1626,6 +1807,9 @@ function printEverywhereInstallReport(report) {
       console.log(`Claude Code: removed legacy command at ${report.claude.legacy_commands_cleanup.path}`);
     }
     for (const warning of report.claude.warnings || []) console.log(`Claude Code warning: ${warning}`);
+  } else if (report.claude) {
+    console.log("Claude Code: native plugin not installed (needs the claude CLI or /plugin)");
+    for (const warning of report.claude.warnings || []) console.log(`  Note: ${warning}`);
   }
 
   if (report.errors.length) {
@@ -1636,8 +1820,12 @@ function printEverywhereInstallReport(report) {
 
   console.log("");
   console.log("Next:");
-  console.log(`  Restart Codex, then use: $${canonicalSkillName}`);
-  console.log("  Restart Claude Code, then run: /goal-prep");
+  console.log(`  Restart Codex, then use: ${canonicalSkillName}`);
+  if (report.claude?.mode === "plugin") {
+    console.log("  Restart Claude Code, then run: /goal-prep");
+  } else if (report.claude) {
+    console.log(`  Finish Claude Code: /plugin marketplace add ${defaultMarketplaceSource} then /plugin install ${claudePluginId()}`);
+  }
 }
 
 function summarizeStatuses(items) {

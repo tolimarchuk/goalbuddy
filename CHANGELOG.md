@@ -6,6 +6,12 @@ Dates are public npm publication dates. Historical entries describe the product 
 
 Release history must describe product behavior with anonymized evidence. Never include client, customer, company, donor, or private project names. Public contributor handles may appear only for attribution.
 
+## Unreleased
+
+- **Claude Code installs as a native plugin.** `npx goalbuddy --target claude` now drives `claude plugin marketplace add` and `claude plugin install --scope user` instead of copying files into `~/.claude`. The plugin serves the skill, the Scout/Judge/Worker subagents, and `/goalbuddy` from its own versioned cache.
+- **No loose-file fallback on Claude Code.** When the `claude` CLI is unavailable or the plugin install fails, the installer writes nothing, reports an `unmanaged` result, and prints the `/plugin` equivalents. A loose `~/.claude/skills/goal-prep` reached through a `~/.agents/skills` symlink used to surface a duplicate `goal-prep` in Codex alongside the plugin's `goalbuddy:goal-prep`; refusing to write it closes that leak.
+- **Non-destructive on upgrade.** This release stops writing loose files but does not delete them. Copies from an earlier version are detected and reported by install and by `doctor --target claude`. The existing `~/.claude/commands/goal.md` migration from 0.4.3 is unchanged.
+- **Updates stay opt-in, and the config is the CLI's to write.** The installer never enables marketplace auto-update, so an install cannot silently move a user to a new version. GoalBuddy does not hand-edit `settings.json` or `known_marketplaces.json`; the `claude` CLI records marketplace and enablement entries there during a normal plugin install and removes them on uninstall. `doctor` and `reset` gained `--target claude`, reading plugin state from `installed_plugins.json` and delegating removal to the `claude` CLI.
 ## 0.4.3: Restore Claude's Native `/goal` (2026-08-05)
 
 - **Claude Code keeps its native `/goal`.** GoalBuddy now installs its execution loop as `/goalbuddy`, removing the namespace collision introduced in 0.4.0.

@@ -95,6 +95,30 @@ npx goalbuddy reset --target codex
 
 Native `codex plugin remove goalbuddy@goalbuddy` only removes the native plugin surface. GoalBuddy also owns the `goal_*.toml` agent files it installed, its Codex plugin cache, its marketplace entry, and old personal skill folders from earlier installs. Use `goalbuddy reset --target codex` when you want those GoalBuddy-owned files removed too.
 
+## Claude Code Install Model
+
+For Claude Code, the canonical install is the native plugin. `npx goalbuddy --target claude` runs the `claude` CLI for you:
+
+```bash
+claude plugin marketplace add tolibear/goalbuddy
+claude plugin install goalbuddy@goalbuddy --scope user
+```
+
+The plugin serves `/goal-prep`, the Scout/Judge/Worker subagents, and `/goalbuddy` from its own versioned cache, so a clean install writes nothing into `~/.claude/skills`, `~/.claude/agents`, or `~/.claude/commands`.
+
+There is no loose-file fallback. Without the `claude` CLI the installer reports an `unmanaged` result and prints the in-app equivalents (`/plugin marketplace add` then `/plugin install`) rather than copying files into your personal directories. That is deliberate: Codex reads standalone skills from `~/.agents/skills` and de-duplicates by `SKILL.md` path rather than by name, so a loose `~/.claude/skills/goal-prep` reached through a `~/.agents/skills` symlink shows up as a second, duplicate `goal-prep` in Codex next to the plugin's `goalbuddy:goal-prep`.
+
+Updates stay your choice. The installer never turns on marketplace auto-update, so a plugin install cannot silently move you to a new version; use `npx goalbuddy update`, or opt into auto-update yourself from `/plugin`. GoalBuddy does not hand-edit your Claude Code config: the marketplace and enablement entries that appear in `settings.json` and `known_marketplaces.json` are written by the `claude` CLI as part of a normal plugin install, and it removes them again on uninstall.
+
+To verify or remove a Claude Code install:
+
+```bash
+npx goalbuddy doctor --target claude
+npx goalbuddy reset --target claude
+```
+
+`doctor` reads plugin state straight from `installed_plugins.json`, so it works with or without the `claude` CLI on `PATH`, and it lists any loose files an earlier version left behind. `reset` delegates removal to the `claude` CLI.
+
 ## What It Creates
 
 ```text

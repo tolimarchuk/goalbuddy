@@ -91,6 +91,56 @@ function fakeCodexEnv(root, options = {}) {
   };
 }
 
+// Writes a fake `claude` into the shared root/bin so tests are deterministic regardless of
+// whether the host has a real claude CLI. `available: false` makes `claude --version` fail so
+// the installer takes the unmanaged (plugin-only, no loose files) path.
+// Options: `available` gates `--version`; `installFails` makes `plugin install` exit non-zero;
+// `recordTo` appends each invocation's argv to a log (assert exact commands); `installVersion`
+// makes `plugin install` write a realistic installed_plugins.json so the upgrade path is testable.
+// The win32 stub is minimal (CI is linux); recordTo/installVersion are posix-only.
+function fakeClaudeBin(root, { available = true, installFails = false, installVersion = null, recordTo = null } = {}) {
+  const bin = join(root, "bin");
+  mkdirSync(bin, { recursive: true });
+  if (process.platform === "win32") {
+    const lines = ["@echo off"];
+    lines.push(available ? "if \"%~1\"==\"--version\" echo 2.1.214 (Claude Code)& exit /b 0" : "if \"%~1\"==\"--version\" exit /b 1");
+    if (installFails) lines.push("if \"%~1\"==\"plugin\" if \"%~2\"==\"install\" exit /b 1");
+    lines.push("exit /b 0", "");
+    writeFileSync(join(bin, "claude.cmd"), lines.join("\r\n"));
+    return bin;
+  }
+  const lines = ["#!/bin/sh"];
+  if (recordTo) lines.push(`printf '%s\\n' "$*" >> ${JSON.stringify(recordTo)}`);
+  lines.push(available
+    ? "if [ \"$1\" = \"--version\" ]; then echo \"2.1.214 (Claude Code)\"; exit 0; fi"
+    : "if [ \"$1\" = \"--version\" ]; then exit 1; fi");
+  if (installFails) {
+    lines.push("if [ \"$1\" = \"plugin\" ] && [ \"$2\" = \"install\" ]; then echo \"install failed\" 1>&2; exit 1; fi");
+  } else if (installVersion) {
+    lines.push("if [ \"$1\" = \"plugin\" ] && [ \"$2\" = \"install\" ]; then");
+    lines.push(`  cache="$CLAUDE_CONFIG_DIR/plugins/cache/goalbuddy/goalbuddy/${installVersion}"`);
+    lines.push("  mkdir -p \"$cache\"");
+    lines.push(`  printf '{"plugins":{"goalbuddy@goalbuddy":[{"scope":"user","installPath":"%s","version":"${installVersion}"}]}}\\n' "$cache" > "$CLAUDE_CONFIG_DIR/plugins/installed_plugins.json"`);
+    lines.push("  exit 0");
+    lines.push("fi");
+  }
+  lines.push("exit 0", "");
+  const path = join(bin, "claude");
+  writeFileSync(path, lines.join("\n"));
+  chmodSync(path, 0o755);
+  return bin;
+}
+
+function absentClaudeEnv(root, base = process.env) {
+  const bin = fakeClaudeBin(root, { available: false });
+  return { ...base, PATH: `${bin}${delimiter}${base.PATH}` };
+}
+
+function nativeClaudeEnv(root, base = process.env) {
+  const bin = fakeClaudeBin(root, { available: true });
+  return { ...base, PATH: `${bin}${delimiter}${base.PATH}` };
+}
+
 test("doctor fails when a required bundled agent is missing", () => {
   const root = mkdtempSync(join(tmpdir(), "goal-maker-cli-test-"));
   try {
@@ -1155,7 +1205,7 @@ test("default command installs Codex and Claude Code when both homes are provide
   try {
     const codexHome = join(root, "codex-home");
     const claudeHome = join(root, "claude-home");
-    const env = fakeCodexEnv(root);
+    const env = nativeClaudeEnv(root, fakeCodexEnv(root));
 
     const install = runGoalMaker(["--codex-home", codexHome, "--claude-home", claudeHome, "--json"], { env });
     assert.equal(install.status, 0, install.stderr || install.stdout);
@@ -1163,11 +1213,14 @@ test("default command installs Codex and Claude Code when both homes are provide
     const report = JSON.parse(install.stdout);
     assert.equal(report.ok, true);
     assert.equal(report.codex.installed, true);
-    assert.equal(report.claude.skill.status, "installed");
+    assert.equal(report.claude.mode, "plugin");
+    assert.equal(report.claude.plugin.plugin, "goalbuddy@goalbuddy");
     assert.equal(existsSync(join(codexHome, "config.toml")), true);
-    assert.equal(existsSync(join(claudeHome, "skills", "goal-prep", "SKILL.md")), true);
-    assert.equal(existsSync(join(claudeHome, "agents", "goal-worker.md")), true);
-    assert.equal(existsSync(join(claudeHome, "commands", "goalbuddy.md")), true);
+    // the plugin serves the skill, subagents, and /goalbuddy from its own cache, so nothing
+    // is written into the personal directories
+    assert.equal(existsSync(join(claudeHome, "skills", "goal-prep")), false);
+    assert.equal(existsSync(join(claudeHome, "agents", "goal-worker.md")), false);
+    assert.equal(existsSync(join(claudeHome, "commands", "goalbuddy.md")), false);
     assert.equal(existsSync(join(claudeHome, "commands", "goal.md")), false);
     assert.equal(existsSync(join(claudeHome, "commands", "goal-prep.md")), false);
   } finally {
@@ -1199,18 +1252,17 @@ test("update refreshes Codex plugin and Claude Code install together", () => {
   try {
     const codexHome = join(root, "codex-home");
     const claudeHome = join(root, "claude-home");
-    const env = fakeCodexEnv(root);
+    const env = nativeClaudeEnv(root, fakeCodexEnv(root));
 
     const install = runGoalMaker(["--codex-home", codexHome, "--claude-home", claudeHome, "--json"], { env });
     assert.equal(install.status, 0, install.stderr || install.stdout);
-
-    writeFileSync(join(claudeHome, "agents", "goal-worker.md"), "stale\n");
 
     const update = runGoalMaker(["update", "--codex-home", codexHome, "--claude-home", claudeHome, "--json"], { env });
     assert.equal(update.status, 0, update.stderr || update.stdout);
     const report = JSON.parse(update.stdout);
     assert.equal(report.ok, true);
-    assert.equal(report.claude.agents.find((agent) => agent.file === "goal-worker.md").status, "updated");
+    assert.equal(report.codex.installed, true);
+    assert.equal(report.claude.mode, "plugin");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -1363,42 +1415,46 @@ test("judge receipt contract includes worker_package in every surface", () => {
   assert.deepEqual(mdSchema.worker_package, tomlSchema.worker_package);
 });
 
-test("installs the Claude skill as goal-prep and migrates the legacy directory", () => {
+test("a loose skill directory from an earlier version is reported, not silently replaced", () => {
   const root = mkdtempSync(join(tmpdir(), "goalbuddy-skill-rename-"));
   try {
     const claudeHome = join(root, "claude");
-    mkdirSync(join(claudeHome, "skills", "goalbuddy"), { recursive: true });
-    writeFileSync(join(claudeHome, "skills", "goalbuddy", "SKILL.md"), "legacy\n");
-    const result = runGoalMaker(["install", "--target", "claude", "--claude-home", claudeHome, "--json"]);
-    assert.equal(result.status, 0, result.stderr);
-    assert.equal(existsSync(join(claudeHome, "skills", "goal-prep", "SKILL.md")), true);
-    assert.equal(existsSync(join(claudeHome, "skills", "goalbuddy")), false);
+    const looseSkill = join(claudeHome, "skills", "goalbuddy");
+    mkdirSync(looseSkill, { recursive: true });
+    writeFileSync(join(looseSkill, "SKILL.md"), "legacy\n");
 
-    const doctor = runGoalMaker(["doctor", "--target", "claude", "--claude-home", claudeHome]);
-    assert.equal(doctor.status, 0, doctor.stderr || doctor.stdout);
-    const report = JSON.parse(doctor.stdout);
-    assert.equal(report.legacy_skill_present, false);
-    assert.match(report.skill_path, pathSuffixPattern("skills", "goal-prep", "SKILL.md"));
+    const env = nativeClaudeEnv(root);
+    const result = runGoalMaker(["install", "--target", "claude", "--claude-home", claudeHome, "--json"], { env });
+    assert.equal(result.status, 0, result.stderr);
+
+    const report = JSON.parse(result.stdout);
+    assert.equal(report.mode, "plugin");
+    // this change installs the plugin; it does not delete anything an earlier version wrote
+    assert.equal(existsSync(looseSkill), true);
+    assert.ok(report.loose_files.includes(looseSkill), JSON.stringify(report.loose_files));
+    assert.match(report.warnings.join("\n"), /duplicate the plugin/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
 });
 
-test("installs /goalbuddy without shadowing Claude Code's native /goal", () => {
+test("the plugin serves /goalbuddy and leaves Claude Code's native /goal alone", () => {
   const root = mkdtempSync(join(tmpdir(), "goalbuddy-goal-command-"));
   try {
     const claudeHome = join(root, "claude");
-    const result = runGoalMaker(["install", "--target", "claude", "--claude-home", claudeHome, "--json"]);
+    const env = nativeClaudeEnv(root);
+    const result = runGoalMaker(["install", "--target", "claude", "--claude-home", claudeHome, "--json"], { env });
     assert.equal(result.status, 0, result.stderr);
-    const command = readFileSync(join(claudeHome, "commands", "goalbuddy.md"), "utf8");
+
+    // the command ships inside the plugin, so no personal-directory copy is written
+    const command = readFileSync("plugins/goalbuddy/commands/goalbuddy.md", "utf8");
     assert.match(command, /GoalBuddy/);
     assert.match(command, /state\.yaml/);
+    assert.equal(existsSync(join(claudeHome, "commands", "goalbuddy.md")), false);
     assert.equal(existsSync(join(claudeHome, "commands", "goal.md")), false);
 
-    const doctor = runGoalMaker(["doctor", "--target", "claude", "--claude-home", claudeHome]);
-    assert.equal(doctor.status, 0, doctor.stderr || doctor.stdout);
+    const doctor = runGoalMaker(["doctor", "--target", "claude", "--claude-home", claudeHome], { env });
     const report = JSON.parse(doctor.stdout);
-    assert.equal(report.goal_command_present, true);
     assert.equal(report.native_goal_available, true);
     assert.equal(report.legacy_goal_command_present, false);
   } finally {
@@ -1416,12 +1472,14 @@ test("install removes an old GoalBuddy-owned /goal command", () => {
       .replace("Run the GoalBuddy execution loop.\n", "Run the GoalBuddy `/goal` execution loop.\n");
     writeFileSync(legacyCommand, legacyBody);
 
-    const result = runGoalMaker(["install", "--target", "claude", "--claude-home", claudeHome, "--json"]);
+    const env = nativeClaudeEnv(root);
+    const result = runGoalMaker(["install", "--target", "claude", "--claude-home", claudeHome, "--json"], { env });
     assert.equal(result.status, 0, result.stderr || result.stdout);
     const report = JSON.parse(result.stdout);
     assert.equal(report.legacy_goal_command_cleanup.removed, true);
     assert.equal(existsSync(legacyCommand), false);
-    assert.equal(existsSync(join(claudeHome, "commands", "goalbuddy.md")), true);
+    // /goalbuddy now ships inside the plugin, so no personal-directory copy is written
+    assert.equal(existsSync(join(claudeHome, "commands", "goalbuddy.md")), false);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -1435,14 +1493,15 @@ test("install preserves a user-authored /goal command and doctor reports the col
     mkdirSync(join(claudeHome, "commands"), { recursive: true });
     writeFileSync(legacyCommand, "My private GoalBuddy helper.\n");
 
-    const result = runGoalMaker(["install", "--target", "claude", "--claude-home", claudeHome, "--json"]);
+    const env = nativeClaudeEnv(root);
+    const result = runGoalMaker(["install", "--target", "claude", "--claude-home", claudeHome, "--json"], { env });
     assert.equal(result.status, 0, result.stderr || result.stdout);
     const report = JSON.parse(result.stdout);
     assert.equal(report.legacy_goal_command_cleanup.preserved, true);
     assert.match(report.warnings.join("\n"), /native \/goal may remain shadowed/);
     assert.equal(readFileSync(legacyCommand, "utf8"), "My private GoalBuddy helper.\n");
 
-    const doctor = runGoalMaker(["doctor", "--target", "claude", "--claude-home", claudeHome]);
+    const doctor = runGoalMaker(["doctor", "--target", "claude", "--claude-home", claudeHome], { env });
     assert.equal(doctor.status, 1, doctor.stderr || doctor.stdout);
     const doctorReport = JSON.parse(doctor.stdout);
     assert.equal(doctorReport.native_goal_available, false);
@@ -1472,10 +1531,256 @@ test("repeated flags take the last value", () => {
   try {
     const first = join(root, "first");
     const second = join(root, "second");
-    const result = runGoalMaker(["install", "--target", "claude", "--claude-home", first, "--claude-home", second, "--json"]);
+    const env = nativeClaudeEnv(root);
+    const result = runGoalMaker(["install", "--target", "claude", "--claude-home", first, "--claude-home", second, "--json"], { env });
     assert.equal(result.status, 0, result.stderr);
-    assert.equal(existsSync(join(second, "skills", "goal-prep", "SKILL.md")), true);
-    assert.equal(existsSync(join(first, "skills")), false);
+    assert.equal(JSON.parse(result.stdout).claude_home, second);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("native Claude install sends the expected plugin command sequence", { skip: process.platform === "win32" }, () => {
+  const root = mkdtempSync(join(tmpdir(), "goalbuddy-claude-native-"));
+  try {
+    const claudeHome = join(root, "claude");
+    const log = join(root, "claude-calls.log");
+    const bin = fakeClaudeBin(root, { available: true, recordTo: log, installVersion: packageVersion });
+    const env = { ...process.env, PATH: `${bin}${delimiter}${process.env.PATH}` };
+
+    const result = runGoalMaker(["install", "--target", "claude", "--claude-home", claudeHome, "--json"], { env });
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+
+    const report = JSON.parse(result.stdout);
+    assert.equal(report.mode, "plugin");
+    assert.equal(report.plugin.plugin, "goalbuddy@goalbuddy");
+    assert.equal(report.plugin.version, packageVersion);
+
+    const calls = readFileSync(log, "utf8");
+    assert.match(calls, /plugin marketplace add tolibear\/goalbuddy/);
+    assert.match(calls, /plugin marketplace update goalbuddy/);
+    assert.match(calls, /plugin install goalbuddy@goalbuddy --scope user/);
+    assert.match(calls, /plugin update goalbuddy@goalbuddy/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("does not write loose Claude files when the claude CLI is absent", () => {
+  const root = mkdtempSync(join(tmpdir(), "goalbuddy-claude-unmanaged-"));
+  try {
+    const claudeHome = join(root, "claude");
+    const env = absentClaudeEnv(root);
+    const result = runGoalMaker(["install", "--target", "claude", "--claude-home", claudeHome, "--json"], { env });
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+
+    const report = JSON.parse(result.stdout);
+    assert.equal(report.mode, "unmanaged");
+    assert.equal(report.plugin, null);
+    assert.match(report.warnings.join("\n"), /claude CLI not found on PATH/);
+    // no loose fallback: a loose skill would surface a duplicate goal-prep in Codex
+    assert.equal(existsSync(join(claudeHome, "skills")), false);
+    assert.equal(existsSync(join(claudeHome, "agents")), false);
+    assert.equal(existsSync(join(claudeHome, "commands", "goalbuddy.md")), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("reports unmanaged and preserves a pre-existing loose install when the plugin install fails", () => {
+  const root = mkdtempSync(join(tmpdir(), "goalbuddy-claude-install-fail-"));
+  try {
+    const claudeHome = join(root, "claude");
+    const looseSkill = join(claudeHome, "skills", "goal-prep");
+    mkdirSync(looseSkill, { recursive: true });
+    writeFileSync(join(looseSkill, "SKILL.md"), "GoalBuddy Goal Prep\n");
+
+    const bin = fakeClaudeBin(root, { available: true, installFails: true });
+    const env = { ...process.env, PATH: `${bin}${delimiter}${process.env.PATH}` };
+    const result = runGoalMaker(["install", "--target", "claude", "--claude-home", claudeHome, "--json"], { env });
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+
+    const report = JSON.parse(result.stdout);
+    assert.equal(report.mode, "unmanaged");
+    assert.match(report.warnings.join("\n"), /Native Claude plugin install failed/);
+    // a failed install must never destroy a working setup it cannot replace
+    assert.equal(existsSync(join(looseSkill, "SKILL.md")), true);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("native Claude install does not modify the user's settings.json", () => {
+  const root = mkdtempSync(join(tmpdir(), "goalbuddy-claude-settings-"));
+  try {
+    const claudeHome = join(root, "claude");
+    mkdirSync(claudeHome, { recursive: true });
+    const settingsPath = join(claudeHome, "settings.json");
+    const original = `${JSON.stringify({ theme: "dark" }, null, 2)}\n`;
+    writeFileSync(settingsPath, original);
+
+    const env = nativeClaudeEnv(root);
+    const result = runGoalMaker(["install", "--target", "claude", "--claude-home", claudeHome, "--json"], { env });
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+    assert.equal(readFileSync(settingsPath, "utf8"), original);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("doctor --target claude reports the plugin without the claude CLI on PATH", () => {
+  const root = mkdtempSync(join(tmpdir(), "goalbuddy-claude-doctor-"));
+  try {
+    const claudeHome = join(root, "claude");
+    const pluginsDir = join(claudeHome, "plugins");
+    mkdirSync(pluginsDir, { recursive: true });
+    writeFileSync(join(pluginsDir, "installed_plugins.json"), JSON.stringify({
+      plugins: { "goalbuddy@goalbuddy": [{ scope: "user", installPath: join(pluginsDir, "cache"), version: packageVersion }] },
+    }));
+
+    const env = absentClaudeEnv(root);
+    const doctor = runGoalMaker(["doctor", "--target", "claude", "--claude-home", claudeHome], { env });
+    // the installed record comes from installed_plugins.json, so doctor works with no CLI
+    assert.equal(doctor.status, 0, doctor.stderr || doctor.stdout);
+    const report = JSON.parse(doctor.stdout);
+    assert.equal(report.plugin_installed, true);
+    assert.equal(report.claude_cli_available, false);
+    assert.deepEqual(report.loose_files, []);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("doctor --target claude honors CLAUDE_CODE_PLUGIN_CACHE_DIR", () => {
+  const root = mkdtempSync(join(tmpdir(), "goalbuddy-plugin-cache-dir-"));
+  try {
+    const claudeHome = join(root, "claude");
+    // the claude CLI stores plugin state here instead of <claude-home>/plugins when this is set
+    const cacheDir = join(root, "custom-plugin-cache");
+    mkdirSync(cacheDir, { recursive: true });
+    writeFileSync(join(cacheDir, "installed_plugins.json"), JSON.stringify({
+      plugins: { "goalbuddy@goalbuddy": [{ scope: "user", installPath: join(cacheDir, "cache"), version: packageVersion }] },
+    }));
+
+    const env = { ...absentClaudeEnv(root), CLAUDE_CODE_PLUGIN_CACHE_DIR: cacheDir };
+    const doctor = runGoalMaker(["doctor", "--target", "claude", "--claude-home", claudeHome], { env });
+    assert.equal(doctor.status, 0, doctor.stderr || doctor.stdout);
+    assert.equal(JSON.parse(doctor.stdout).installed_version, packageVersion);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("doctor --target claude fails and lists loose GoalBuddy files when present", () => {
+  const root = mkdtempSync(join(tmpdir(), "goalbuddy-claude-doctor-loose-"));
+  try {
+    const claudeHome = join(root, "claude");
+    const pluginsDir = join(claudeHome, "plugins");
+    mkdirSync(pluginsDir, { recursive: true });
+    writeFileSync(join(pluginsDir, "installed_plugins.json"), JSON.stringify({
+      plugins: { "goalbuddy@goalbuddy": [{ scope: "user", installPath: join(pluginsDir, "cache"), version: packageVersion }] },
+    }));
+    mkdirSync(join(claudeHome, "agents"), { recursive: true });
+    const looseAgent = join(claudeHome, "agents", "goal-scout.md");
+    writeFileSync(looseAgent, "GoalBuddy Scout agent\n");
+
+    const env = nativeClaudeEnv(root);
+    const doctor = runGoalMaker(["doctor", "--target", "claude", "--claude-home", claudeHome], { env });
+    assert.equal(doctor.status, 1, doctor.stdout);
+    assert.ok(JSON.parse(doctor.stdout).loose_files.includes(looseAgent));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("loose-file detection spares a user's own same-named files", () => {
+  const root = mkdtempSync(join(tmpdir(), "goalbuddy-claude-provenance-"));
+  try {
+    const claudeHome = join(root, "claude");
+    mkdirSync(join(claudeHome, "agents"), { recursive: true });
+    const userAgent = join(claudeHome, "agents", "goal-scout.md");
+    writeFileSync(userAgent, "My own scout agent, nothing to do with the product.\n");
+
+    const env = nativeClaudeEnv(root);
+    const result = runGoalMaker(["install", "--target", "claude", "--claude-home", claudeHome, "--json"], { env });
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+    // no GoalBuddy marker, so it is not ours to claim
+    assert.deepEqual(JSON.parse(result.stdout).loose_files, []);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("agents --target claude points at the plugin instead of writing files", () => {
+  const root = mkdtempSync(join(tmpdir(), "goalbuddy-claude-agents-"));
+  try {
+    const claudeHome = join(root, "claude");
+    const env = nativeClaudeEnv(root);
+    const result = runGoalMaker(["agents", "--target", "claude", "--claude-home", claudeHome, "--json"], { env });
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+
+    const report = JSON.parse(result.stdout);
+    assert.equal(report.mode, "plugin");
+    assert.equal(report.plugin, "goalbuddy@goalbuddy");
+    assert.equal(existsSync(join(claudeHome, "agents")), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("reset --target claude delegates to the CLI and never hand-edits config", () => {
+  const root = mkdtempSync(join(tmpdir(), "goalbuddy-claude-reset-"));
+  try {
+    const claudeHome = join(root, "claude");
+    mkdirSync(claudeHome, { recursive: true });
+    const settingsPath = join(claudeHome, "settings.json");
+    const original = `${JSON.stringify({ theme: "dark" }, null, 2)}\n`;
+    writeFileSync(settingsPath, original);
+
+    const log = join(root, "claude-calls.log");
+    const bin = fakeClaudeBin(root, { available: true, recordTo: log });
+    const env = { ...process.env, PATH: `${bin}${delimiter}${process.env.PATH}` };
+
+    const result = runGoalMaker(["reset", "--target", "claude", "--claude-home", claudeHome, "--json"], { env });
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+
+    const calls = readFileSync(log, "utf8");
+    assert.match(calls, /plugin uninstall goalbuddy@goalbuddy/);
+    assert.match(calls, /plugin marketplace remove goalbuddy/);
+    assert.equal(readFileSync(settingsPath, "utf8"), original);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("install everywhere still installs Codex when the claude CLI is absent", () => {
+  const root = mkdtempSync(join(tmpdir(), "goalbuddy-everywhere-"));
+  try {
+    const codexHome = join(root, "codex-home");
+    const claudeHome = join(root, "claude-home");
+    const env = absentClaudeEnv(root, fakeCodexEnv(root));
+
+    const result = runGoalMaker(["--codex-home", codexHome, "--claude-home", claudeHome, "--json"], { env });
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+
+    const report = JSON.parse(result.stdout);
+    assert.equal(report.codex.installed, true);
+    assert.equal(report.claude.mode, "unmanaged");
+    assert.equal(existsSync(join(claudeHome, "skills")), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("claude home honors CLAUDE_CONFIG_DIR when no --claude-home is given", () => {
+  const root = mkdtempSync(join(tmpdir(), "goalbuddy-config-dir-"));
+  try {
+    const configDir = join(root, "config-claude");
+    const bin = fakeClaudeBin(root, { available: false });
+    const env = { ...process.env, CLAUDE_CONFIG_DIR: configDir, PATH: `${bin}${delimiter}${process.env.PATH}` };
+    delete env.CLAUDE_HOME;
+    const doctor = runGoalMaker(["doctor", "--target", "claude"], { env });
+    assert.equal(JSON.parse(doctor.stdout).claude_home, configDir);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
